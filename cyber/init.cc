@@ -74,13 +74,21 @@ void InitLogger(const char* binary_name) {
   google::SetLogDestination(google::FATAL, "");
 
   // Init async logger
-  async_logger = new ::apollo::cyber::logger::AsyncLogger(
-      google::base::GetLogger(static_cast<google::LogSeverity>(FLAGS_minloglevel)));
-  google::base::SetLogger(static_cast<google::LogSeverity>(FLAGS_minloglevel), async_logger);
+  async_logger =
+      new ::apollo::cyber::logger::AsyncLogger(google::base::GetLogger(
+          static_cast<google::LogSeverity>(FLAGS_minloglevel)));
+  google::base::SetLogger(static_cast<google::LogSeverity>(FLAGS_minloglevel),
+                          async_logger);
   async_logger->Start();
 }
 
-void StopLogger() { delete async_logger; }
+void StopLogger() {
+  if (async_logger) {
+    // only stop the async logger, do not delete it to avoid dangling pointer
+    // in glog static object destructor
+    async_logger->Stop();
+  }
+}
 
 }  // namespace
 

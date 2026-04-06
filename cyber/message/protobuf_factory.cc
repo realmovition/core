@@ -47,15 +47,28 @@ bool ProtobufFactory::RegisterMessage(const Descriptor& desc) {
 }
 
 bool ProtobufFactory::RegisterMessage(const ProtoDesc& proto_desc) {
+  FileDescriptorProto file_desc_proto;
+  file_desc_proto.ParseFromString(proto_desc.desc());
+
+  // If the message in this proto file has been registered, return true.
+  if (FindMessageTypeByFile(file_desc_proto)) {
+    return true;
+  }
   for (int i = 0; i < proto_desc.dependencies_size(); ++i) {
     auto dep = proto_desc.dependencies(i);
     if (!RegisterMessage(dep)) {
       return false;
     }
-  }
+    FileDescriptorProto dep_file_desc_proto;
+    dep_file_desc_proto.ParseFromString(dep.desc());
+    const google::protobuf::Descriptor* descriptor =
+        FindMessageTypeByFile(dep_file_desc_proto);
 
-  FileDescriptorProto file_desc_proto;
-  file_desc_proto.ParseFromString(proto_desc.desc());
+    // If descriptor is found, replace the dependency with registered path.
+    if (descriptor != nullptr) {
+      file_desc_proto.set_dependency(i, descriptor->file()->name());
+    }
+  }
   return RegisterMessage(file_desc_proto);
 }
 
@@ -207,10 +220,23 @@ const google::protobuf::ServiceDescriptor* ProtobufFactory::FindServiceByName(
   return pool_->FindServiceByName(name);
 }
 
+const Descriptor* ProtobufFactory::FindMessageTypeByFile(
+    const FileDescriptorProto& file_desc_proto) {
+  const std::string& scope = file_desc_proto.package();
+  std::string type;
+  if (file_desc_proto.message_type_size()) {
+    type = scope + "." + file_desc_proto.message_type(0).name();
+  }
+  const google::protobuf::Descriptor* descriptor =
+      pool_->FindMessageTypeByName(type);
+  return descriptor;
+}
+
 void ErrorCollector::RecordError(absl::string_view filename,
-                   absl::string_view element_name,
-                   const google::protobuf::Message* descriptor, ErrorLocation location,
-                   absl::string_view message) {
+                                 absl::string_view element_name,
+                                 const google::protobuf::Message* descriptor,
+                                 ErrorLocation location,
+                                 absl::string_view message) {
   UNUSED(element_name);
   UNUSED(descriptor);
   UNUSED(location);
@@ -218,10 +244,10 @@ void ErrorCollector::RecordError(absl::string_view filename,
 }
 
 void ErrorCollector::RecordWarning(absl::string_view filename,
-                               absl::string_view element_name,
-                               const google::protobuf::Message* descriptor,
-                               ErrorLocation location,
-                               absl::string_view message) {
+                                   absl::string_view element_name,
+                                   const google::protobuf::Message* descriptor,
+                                   ErrorLocation location,
+                                   absl::string_view message) {
   UNUSED(element_name);
   UNUSED(descriptor);
   UNUSED(location);

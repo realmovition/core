@@ -29,6 +29,9 @@
 #include <fstream>
 #include <string>
 
+#include "google/protobuf/util/json_util.h"
+#include "nlohmann/json.hpp"
+
 namespace apollo {
 namespace cyber {
 namespace common {
@@ -108,6 +111,10 @@ bool GetProtoFromBinaryFile(const std::string &file_name,
 
 bool GetProtoFromFile(const std::string &file_name,
                       google::protobuf::Message *message) {
+  if (!PathExists(file_name)) {
+    AERROR << "File does not exist! " << file_name;
+    return false;
+  }
   // Try the binary parser first if it's much likely a binary proto.
   static const std::string kBinExt = ".bin";
   if (std::equal(kBinExt.rbegin(), kBinExt.rend(), file_name.rbegin())) {
@@ -117,6 +124,23 @@ bool GetProtoFromFile(const std::string &file_name,
 
   return GetProtoFromASCIIFile(file_name, message) ||
          GetProtoFromBinaryFile(file_name, message);
+}
+
+bool GetProtoFromJsonFile(const std::string &file_name,
+                          google::protobuf::Message *message) {
+  using google::protobuf::util::JsonParseOptions;
+  using google::protobuf::util::JsonStringToMessage;
+  std::ifstream ifs(file_name);
+  if (!ifs.is_open()) {
+    AERROR << "Failed to open file " << file_name;
+    return false;
+  }
+  nlohmann::json Json;
+  ifs >> Json;
+  ifs.close();
+  JsonParseOptions options;
+  options.ignore_unknown_fields = true;
+  return (JsonStringToMessage(Json.dump(), message, options).ok());
 }
 
 bool GetContent(const std::string &file_name, std::string *content) {

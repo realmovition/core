@@ -28,7 +28,7 @@
 #include "cyber/tools/cyber_monitor/general_channel_message.h"
 #include "cyber/tools/cyber_monitor/renderable_message.h"
 
-#include <curses.h> // NOLINT
+#include "curses.h"
 
 namespace {
 constexpr double MinHalfFrameRatio = 12.5;

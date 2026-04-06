@@ -33,7 +33,7 @@ TEST(LogFileObjectTest, init_and_write) {
   std::string basename = "logfile";
   LogFileObject logfileobject(google::INFO, basename.c_str());
   logfileobject.SetBasename("base");
-  const auto timep = std::chrono::system_clock::now();
+  auto timep = std::chrono::system_clock::now();
   std::string message = "cyber logger test";
   logfileobject.Write(false, timep, message.c_str(), 20);
   logfileobject.SetExtension("unittest");
