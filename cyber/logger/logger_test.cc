@@ -28,7 +28,7 @@ namespace logger {
 
 TEST(LoggerTest, WriteAndFlush) {
   Logger logger(google::base::GetLogger(google::INFO));
-  const auto timep = std::chrono::system_clock::now();
+  auto timep = std::chrono::system_clock::now();
   std::string message = "I0909 99:99:99.999999 99999 logger_test.cc:999] ";
   message.append(LEFT_BRACKET);
   message.append("LoggerTest");
@@ -49,7 +49,8 @@ TEST(LoggerTest, SetLoggerToGlog) {
   google::SetLogDestination(google::WARNING, "");
   google::SetLogDestination(google::FATAL, "");
   Logger* logger = new Logger(google::base::GetLogger(google::INFO));
-  google::base::SetLogger(static_cast<google::LogSeverity>(FLAGS_minloglevel), logger);
+  google::base::SetLogger(static_cast<google::LogSeverity>(FLAGS_minloglevel),
+                          logger);
 
   ALOG_MODULE("LoggerTest2", INFO) << "test set logger to glog";
   ALOG_MODULE("LoggerTest2", WARN) << "test set logger to glog";

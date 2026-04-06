@@ -137,8 +137,12 @@ class AsyncLogger : public google::base::Logger {
     std::chrono::system_clock::time_point ts;
     std::string message;
     int32_t level;
-    Msg() : ts(), message(), level(google::INFO) {}
-    Msg(std::chrono::system_clock::time_point ts, std::string&& message, int32_t level)
+    Msg()
+        : ts(std::chrono::system_clock::duration::zero()),
+          message(),
+          level(google::INFO) {}
+    Msg(std::chrono::system_clock::time_point ts, std::string&& message,
+        int32_t level)
         : ts(ts), message(std::move(message)), level(level) {}
     Msg(const Msg& rsh) {
       ts = rsh.ts;

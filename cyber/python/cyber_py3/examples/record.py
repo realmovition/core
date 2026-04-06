@@ -46,7 +46,7 @@ def test_record_writer(writer_path):
     if not fwriter.open(writer_path):
         print('Failed to open record writer!')
         return
-    print('+++ Begin to writer +++')
+    print('+++ Begin to write +++')
 
     # Writer 2 ChatterBenchmark
     msg = ChatterBenchmark()
