@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycyber"
+dynamic = ["version"]
+description = "Apollo Cyber RT Python bindings packaged from the core repository."
+readme = { file = "../../readme.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Apollo Authors" }]
+urls = { Homepage = "https://github.com/wheelos/core", Source = "https://github.com/wheelos/core" }
+dependencies = ["protobuf>=5.29.0,<6"]
+
+[project.scripts]
+cyber_channel = "pycyber._entrypoints:cyber_channel"
+cyber_launch = "pycyber._entrypoints:cyber_launch"
+cyber_node = "pycyber._entrypoints:cyber_node"
+cyber_service = "pycyber._entrypoints:cyber_service"
+listener = "pycyber._entrypoints:listener"
+talker = "pycyber._entrypoints:talker"
+
+[tool.setuptools]
+package-dir = { "" = "staging/src" }
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["staging/src"]
+
+[tool.setuptools.package-data]
+"pycyber.conf" = ["*.conf"]
+"pycyber.internal" = ["*.so", "*.so.*"]
+
+[tool.setuptools_scm]
+tag_regex = "^pycyber-v(?P<version>.+)$"
+write_to = "staging/src/pycyber/_version.py"
+fallback_version = "0.1.0.dev0"
