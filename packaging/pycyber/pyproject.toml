@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pycyber"
 dynamic = ["version"]
 description = "Apollo Cyber RT Python bindings packaged from the core repository."
-readme = { file = "../../readme.md", content-type = "text/markdown" }
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Apollo Authors" }]
