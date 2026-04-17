@@ -26,6 +26,9 @@ cc_test(
     name = "py_cyber_test",
     size = "small",
     srcs = ["py_cyber_test.cc"],
+    data = [
+        "//cyber/conf:runtime_files",
+    ],
     deps = [
         ":py_cyber",
         "//cyber/proto:unit_test_cc_proto",

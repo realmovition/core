@@ -16,6 +16,7 @@
 
 #include "cyber/python/internal/py_cyber.h"
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -72,6 +73,14 @@ TEST(PyCyberTest, create_writer) {
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
+  if (std::getenv("CYBER_PATH") == nullptr) {
+    const char* test_srcdir = std::getenv("TEST_SRCDIR");
+    if (test_srcdir != nullptr) {
+      const std::string runfiles_cyber_root =
+          std::string(test_srcdir) + "/_main/cyber";
+      setenv("CYBER_PATH", runfiles_cyber_root.c_str(), 1);
+    }
+  }
   apollo::cyber::py_init("py_init_test");
   const int ret_val = RUN_ALL_TESTS();
   apollo::cyber::py_shutdown();

@@ -4,3 +4,6 @@ bazel-*
 data/
 
 *.lock
+
+packaging/pycyber
+.pycyber-build-venv
