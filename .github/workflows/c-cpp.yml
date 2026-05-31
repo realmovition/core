@@ -18,4 +18,9 @@ jobs:
     - name: make
       run: bazel build //cyber
     - name: test
-      run: bazel test //cyber/message/...
+      run: |
+        bazel test \
+          //cyber/message/... \
+          //cyber/transport/rtps:rtps_test \
+          //cyber/transport/integration_test:rtps_transceiver_test \
+          //cyber/examples/integration_test:examples_regression_tests

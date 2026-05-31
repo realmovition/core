@@ -16,6 +16,9 @@
 
 #include "cyber/transport/transmitter/rtps_transmitter.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -155,10 +158,15 @@ TEST_F(RtpsTransceiverTest, enable_and_disable) {
 }  // namespace apollo
 
 int main(int argc, char** argv) {
+  const auto cyber_path = (std::filesystem::current_path() / "cyber").string();
+  setenv("CYBER_PATH", cyber_path.c_str(), 1);
   testing::InitGoogleTest(&argc, argv);
   apollo::cyber::Init(argv[0]);
   apollo::cyber::transport::Transport::Instance();
-  auto res = RUN_ALL_TESTS();
+  const auto res = RUN_ALL_TESTS();
   apollo::cyber::transport::Transport::Instance()->Shutdown();
-  return res;
+  apollo::cyber::Clear();
+  fflush(stdout);
+  fflush(stderr);
+  _Exit(res);
 }

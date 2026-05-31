@@ -26,6 +26,7 @@ cc_test(
     name = "rtps_transceiver_test",
     size = "small",
     srcs = ["rtps_transceiver_test.cc"],
+    data = ["//cyber:cyber_conf"],
     deps = [
         "//cyber:cyber_core",
         "//cyber/proto:unit_test_cc_proto",
