@@ -13,8 +13,22 @@
   ```
   That script currently runs:
   ```bash
-  bazel build //cyber/... --distdir=/tmp/cache/
+  bazel build --config=ci //cyber/... --distdir=/tmp/cache/
   ```
+- The canonical Ubuntu 22.04 CI / release-validation baseline is:
+  ```bash
+  bash scripts/release/ubuntu2204_baseline.sh
+  ```
+- Keep `MODULE.bazel.lock` checked in and in sync. Use:
+  ```bash
+  bash scripts/release/check_bzlmod_lockfile.sh --check
+  bash scripts/release/check_bzlmod_lockfile.sh --update
+  ```
+- The release artifact entrypoint is:
+  ```bash
+  bash scripts/release/build_release_artifacts.sh
+  ```
+  It runs the Ubuntu 22.04 baseline by default, then collects `//:wheelos_core` outputs and the `pycyber` wheelhouse into a single artifact directory.
 - CI also uses a narrower top-level build:
   ```bash
   bazel build //cyber
@@ -28,6 +42,15 @@
   bazel test //cyber/message:message_header_test --test_output=errors
   ```
   In general, tests are defined as `cc_test` targets in the nearest `BUILD` file and should be run as `bazel test //path/to/package:target_name`.
+- After Fast DDS / RTPS / `cyber/examples` changes, run the durable regression suite:
+  ```bash
+  bazel test \
+    //cyber/examples/integration_test:examples_regression_tests \
+    //cyber/transport/integration_test:rtps_transceiver_test \
+    //cyber/transport/rtps:rtps_test \
+    --test_output=errors
+  ```
+- `//cyber/examples/integration_test:examples_regression_tests` is the long-lived example coverage entrypoint. It covers binary payload integrity (including embedded `\0` bytes for the Fast CDR string patch path), 1 writer / N readers fanout, N writers / 1 reader fanin, multi-client service round trips, payload-size pub/sub stress, and service burst matrices. Keep these tests discovery-gated and rely on bounded completion plus low-bar throughput assertions instead of brittle absolute latency checks.
 - Before running built tools or examples from `bazel-bin`, source the runtime environment:
   ```bash
   source scripts/env/runtime.bash
@@ -45,6 +68,7 @@
   bash scripts/lint/lint.sh -a
   ```
   These scripts are inherited from Apollo tooling and currently source `scripts/apollo.bashrc` and `scripts/apollo_base.sh`, which are not present in this fork. Treat them as intended entrypoints, but confirm/fix their environment before relying on them.
+- Persistent repository context lives under `.github/context/`. Read `.github/context/index.md` before changing build/release flow or middleware roadmap assumptions.
 
 ## High-level architecture
 
@@ -80,3 +104,15 @@
 - Keep tests and libraries in the nearest Bazel package. The repository convention is to colocate `cc_library` / `cc_binary` / `cc_test` targets with the code in the local `BUILD` file rather than centralizing tests elsewhere.
 - BUILD files that define `cc_library`, `cc_binary`, `cc_test`, or `gpu_library` targets are expected to include `cpplint()`. `scripts/lint/lint.sh` will auto-insert that macro into unattended BUILD files before running the Bazel cpplint configuration.
 - The example DAGs still use Apollo-style absolute library paths under `/apollo/bazel-bin/...`. If you update or add DAG examples in this fork, verify the shared-library path matches the actual Bazel output layout for this repository instead of assuming those upstream paths are correct.
+
+## Middleware roadmap
+
+- The current stable transport baseline is Fast DDS 2.14.6 + Fast CDR 2.2.7 with the carried Fast CDR embedded-null string serialization patch. Treat that patch as intentional until protobuf-binary-string compatibility is no longer required.
+- Prefer staged evolution over a direct Fast DDS 3.x jump:
+  1. stabilize current RTPS + example regression coverage
+  2. improve in-process and same-host zero-copy/data-sharing paths
+  3. add heterogeneous buffer-handle negotiation only after the shared-memory contracts are explicit and testable
+- For roadmap, build/release, and skill details, use:
+  - `.github/context/roadmaps/middleware-evolution.md`
+  - `.github/context/design/build-release-architecture.md`
+  - `.github/context/skills/bzlmod-build-release.md`

@@ -90,7 +90,7 @@ cc_library(
         "//cyber/transport/rtps:sub_listener",
         "@com_github_google_glog//:glog",
         "@com_google_protobuf//:protobuf",
-        "@fastdds",
+        "@fastdds//:fastdds",
     ],
 )
 
@@ -99,4 +99,14 @@ filegroup(
     srcs = glob([
         "conf/*.conf",
     ]),
+)
+
+filegroup(
+    name = "cyber_header",
+    srcs = [
+        "binary.h",
+        "cyber.h",
+        "init.h",
+        "state.h",
+    ]
 )

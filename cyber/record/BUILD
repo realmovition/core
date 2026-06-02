@@ -118,6 +118,8 @@ cc_test(
     srcs = ["record_reader_test.cc"],
     deps = [
         "//cyber",
+        "//cyber/examples/proto:examples_fbs",
+        "//cyber/message:flatbuffers_message",
         "//cyber/proto:record_cc_proto",
         "@com_google_googletest//:gtest_main",
     ],

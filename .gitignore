@@ -4,3 +4,16 @@ bazel-*
 data
 
 *.lock
+!MODULE.bazel.lock
+
+.pycyber-build-venv/
+artifacts/
+packaging/pycyber/API_DOCS.md
+packaging/pycyber/staging/
+packaging/pycyber/build/
+packaging/pycyber/dist/
+packaging/pycyber/wheelhouse/
+__pycache__/
+packaging/pycyber/.pytest_cache/
+
+scripts/release/__pycache__

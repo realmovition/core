@@ -1,9 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+set -euo pipefail
 
+LOCAL_CACHE="${LOCAL_CACHE:-/tmp/cache/}"
 
-LOCAL_CACHE="/tmp/cache/"
+if [ "$#" -eq 0 ]; then
+  set -- //cyber/...
+fi
 
-bazel build //cyber/... --distdir="$LOCAL_CACHE"
+bazel build --config=ci --distdir="$LOCAL_CACHE" "$@"

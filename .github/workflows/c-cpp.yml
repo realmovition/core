@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: Bazel CI
 
 on:
   push:
@@ -7,20 +7,16 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-
+  baseline:
+    runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v4
-    - name: install
-      run: sudo bash scripts/deps/install_bazel.sh
-    - name: make
-      run: bazel build //cyber
-    - name: test
-      run: |
-        bazel test \
-          //cyber/message/... \
-          //cyber/transport/rtps:rtps_test \
-          //cyber/transport/integration_test:rtps_transceiver_test \
-          //cyber/examples/integration_test:examples_regression_tests
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Bazel
+        run: sudo bash scripts/deps/install_bazel.sh
+      - name: Run Ubuntu 22.04 baseline
+        run: bash scripts/release/ubuntu2204_baseline.sh

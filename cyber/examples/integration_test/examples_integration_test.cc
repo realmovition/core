@@ -15,24 +15,24 @@
 //  Created Date: 2026-05-31
 //  Author: daohu527
 
-
-#include "cyber/cyber.h"
-#include "cyber/examples/proto/examples.pb.h"
-#include "cyber/node/node_channel_impl.h"
-
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "gtest/gtest.h"
+
+#include "cyber/examples/proto/examples.pb.h"
+
+#include "cyber/examples/integration_test/examples_test_utils.h"
 
 namespace apollo {
 namespace cyber {
@@ -42,23 +42,11 @@ namespace {
 
 using apollo::cyber::examples::proto::Chatter;
 using apollo::cyber::examples::proto::Driver;
-
-std::string UniqueName(const std::string& prefix) {
-  static std::atomic<uint64_t> counter{0};
-  return prefix + "_" + std::to_string(counter.fetch_add(1));
-}
-
-template <typename Predicate>
-bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout) {
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (predicate()) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  return predicate();
-}
+using apollo::cyber::examples::test::kWarmupSeqBase;
+using apollo::cyber::examples::test::MakePayload;
+using apollo::cyber::examples::test::MakeReaderConfig;
+using apollo::cyber::examples::test::UniqueName;
+using apollo::cyber::examples::test::WaitFor;
 
 class ExamplesIntegrationTest : public ::testing::Test {
  protected:
@@ -79,8 +67,7 @@ TEST_F(ExamplesIntegrationTest, TalkerListenerRoundTrip) {
 
   auto listener_node = apollo::cyber::CreateNode(UniqueName("listener"));
   auto reader = listener_node->CreateReader<Chatter>(
-      channel_name_,
-      [&](const std::shared_ptr<Chatter>& msg) {
+      channel_name_, [&](const std::shared_ptr<Chatter>& msg) {
         {
           std::lock_guard<std::mutex> lock(mutex);
           received_msg = *msg;
@@ -113,102 +100,373 @@ TEST_F(ExamplesIntegrationTest, TalkerListenerRoundTrip) {
   EXPECT_EQ(received_msg.lidar_timestamp(), 456U);
 }
 
-TEST_F(ExamplesIntegrationTest, TalkerListenerPerformanceSmoke) {
-  constexpr size_t kMessageCount = 64;
-  std::mutex mutex;
-  std::condition_variable cv;
-  size_t received_count = 0;
-  auto first_receive = std::chrono::steady_clock::time_point{};
-  auto last_receive = std::chrono::steady_clock::time_point{};
+TEST_F(ExamplesIntegrationTest, BinaryPayloadMatrixPreservesContent) {
+  const std::vector<std::string> payloads = {
+      MakePayload(0, 1),    MakePayload(1, 2),    MakePayload(64, 3),
+      MakePayload(1024, 4), MakePayload(8192, 5), MakePayload(65536, 6)};
 
-  auto listener_node = apollo::cyber::CreateNode(UniqueName("perf_listener"));
-  apollo::cyber::ReaderConfig reader_config;
-  reader_config.channel_name = channel_name_;
-  reader_config.pending_queue_size = kMessageCount;
-  reader_config.qos_profile.set_depth(kMessageCount);
+  std::mutex mutex;
+  bool warmup_received = false;
+  std::vector<Chatter> received_messages;
+
+  auto listener_node = apollo::cyber::CreateNode(UniqueName("binary_listener"));
   auto reader = listener_node->CreateReader<Chatter>(
-      reader_config,
+      MakeReaderConfig(channel_name_, payloads.size() * 2 + 8),
       [&](const std::shared_ptr<Chatter>& msg) {
-        (void)msg;
         std::lock_guard<std::mutex> lock(mutex);
-        const auto now = std::chrono::steady_clock::now();
-        if (received_count == 0) {
-          first_receive = now;
+        if (msg->seq() == kWarmupSeqBase) {
+          warmup_received = true;
+          return;
         }
-        ++received_count;
-        last_receive = now;
-        if (received_count >= kMessageCount) {
-          cv.notify_one();
+        received_messages.push_back(*msg);
+      });
+  ASSERT_NE(reader, nullptr);
+
+  auto talker_node = apollo::cyber::CreateNode(UniqueName("binary_talker"));
+  auto writer = talker_node->CreateWriter<Chatter>(channel_name_);
+  ASSERT_NE(writer, nullptr);
+
+  for (size_t attempt = 0; attempt < 30; ++attempt) {
+    if (WaitFor(
+            [&]() {
+              std::lock_guard<std::mutex> lock(mutex);
+              return warmup_received;
+            },
+            std::chrono::milliseconds(100))) {
+      break;
+    }
+    auto warmup = std::make_shared<Chatter>();
+    warmup->set_seq(kWarmupSeqBase);
+    warmup->set_content("warmup");
+    ASSERT_TRUE(writer->Write(warmup));
+  }
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return warmup_received;
+      },
+      std::chrono::seconds(1)));
+
+  for (size_t i = 0; i < payloads.size(); ++i) {
+    auto msg = std::make_shared<Chatter>();
+    msg->set_seq(i);
+    msg->set_content(payloads[i]);
+    msg->set_timestamp(i + 100);
+    msg->set_lidar_timestamp(i + 200);
+    ASSERT_TRUE(writer->Write(msg));
+  }
+
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return received_messages.size() == payloads.size();
+      },
+      std::chrono::seconds(5)));
+
+  std::lock_guard<std::mutex> lock(mutex);
+  ASSERT_EQ(received_messages.size(), payloads.size());
+  for (size_t i = 0; i < payloads.size(); ++i) {
+    EXPECT_EQ(received_messages[i].seq(), i);
+    EXPECT_EQ(received_messages[i].content(), payloads[i]);
+    EXPECT_EQ(received_messages[i].timestamp(), i + 100);
+    EXPECT_EQ(received_messages[i].lidar_timestamp(), i + 200);
+  }
+}
+
+TEST_F(ExamplesIntegrationTest, SingleWriterMultipleReadersFanout) {
+  constexpr size_t kReaderCount = 3;
+  constexpr size_t kMessageCount = 12;
+  const std::vector<std::string> payloads = {
+      MakePayload(128, 11),  MakePayload(256, 12),  MakePayload(384, 13),
+      MakePayload(512, 14),  MakePayload(640, 15),  MakePayload(768, 16),
+      MakePayload(896, 17),  MakePayload(1024, 18), MakePayload(1152, 19),
+      MakePayload(1280, 20), MakePayload(1408, 21), MakePayload(1536, 22)};
+
+  struct ReaderState {
+    bool warmup_received = false;
+    std::vector<Chatter> messages;
+  };
+
+  std::mutex mutex;
+  std::vector<ReaderState> reader_states(kReaderCount);
+  std::vector<std::shared_ptr<apollo::cyber::Node>> reader_nodes;
+  std::vector<std::shared_ptr<apollo::cyber::Reader<Chatter>>> readers;
+  reader_nodes.reserve(kReaderCount);
+  readers.reserve(kReaderCount);
+
+  for (size_t reader_index = 0; reader_index < kReaderCount; ++reader_index) {
+    reader_nodes.emplace_back(apollo::cyber::CreateNode(
+        UniqueName("fanout_listener_" + std::to_string(reader_index))));
+    auto reader = reader_nodes.back()->CreateReader<Chatter>(
+        MakeReaderConfig(channel_name_, kMessageCount * 2),
+        [&, reader_index](const std::shared_ptr<Chatter>& msg) {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (msg->seq() == kWarmupSeqBase) {
+            reader_states[reader_index].warmup_received = true;
+            return;
+          }
+          reader_states[reader_index].messages.push_back(*msg);
+        });
+    ASSERT_NE(reader, nullptr);
+    readers.emplace_back(std::move(reader));
+  }
+
+  auto talker_node = apollo::cyber::CreateNode(UniqueName("fanout_talker"));
+  auto writer = talker_node->CreateWriter<Chatter>(channel_name_);
+  ASSERT_NE(writer, nullptr);
+
+  for (size_t attempt = 0; attempt < 30; ++attempt) {
+    if (WaitFor(
+            [&]() {
+              std::lock_guard<std::mutex> lock(mutex);
+              for (const auto& state : reader_states) {
+                if (!state.warmup_received) {
+                  return false;
+                }
+              }
+              return true;
+            },
+            std::chrono::milliseconds(100))) {
+      break;
+    }
+    auto warmup = std::make_shared<Chatter>();
+    warmup->set_seq(kWarmupSeqBase);
+    warmup->set_content("fanout_warmup");
+    ASSERT_TRUE(writer->Write(warmup));
+  }
+
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& state : reader_states) {
+          if (!state.warmup_received) {
+            return false;
+          }
+        }
+        return true;
+      },
+      std::chrono::seconds(3)));
+
+  for (size_t i = 0; i < kMessageCount; ++i) {
+    auto msg = std::make_shared<Chatter>();
+    msg->set_seq(i);
+    msg->set_content(payloads[i]);
+    msg->set_timestamp(i + 300);
+    msg->set_lidar_timestamp(i + 400);
+    ASSERT_TRUE(writer->Write(msg));
+  }
+
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& state : reader_states) {
+          if (state.messages.size() != kMessageCount) {
+            return false;
+          }
+        }
+        return true;
+      },
+      std::chrono::seconds(5)));
+
+  std::lock_guard<std::mutex> lock(mutex);
+  for (size_t reader_index = 0; reader_index < kReaderCount; ++reader_index) {
+    SCOPED_TRACE("reader_" + std::to_string(reader_index));
+    ASSERT_EQ(reader_states[reader_index].messages.size(), kMessageCount);
+    for (size_t i = 0; i < kMessageCount; ++i) {
+      EXPECT_EQ(reader_states[reader_index].messages[i].seq(), i);
+      EXPECT_EQ(reader_states[reader_index].messages[i].content(), payloads[i]);
+      EXPECT_EQ(reader_states[reader_index].messages[i].timestamp(), i + 300);
+      EXPECT_EQ(reader_states[reader_index].messages[i].lidar_timestamp(),
+                i + 400);
+    }
+  }
+}
+
+TEST_F(ExamplesIntegrationTest, MultipleWritersSingleReaderFanIn) {
+  constexpr size_t kWriterCount = 3;
+  constexpr size_t kMessagesPerWriter = 10;
+  const std::vector<std::string> payloads = {
+      MakePayload(256, 31), MakePayload(512, 32), MakePayload(768, 33)};
+
+  std::mutex mutex;
+  std::set<size_t> warmup_writers;
+  std::vector<std::vector<Chatter>> messages_by_writer(kWriterCount);
+
+  auto listener_node = apollo::cyber::CreateNode(UniqueName("fanin_listener"));
+  auto reader = listener_node->CreateReader<Chatter>(
+      MakeReaderConfig(channel_name_, kWriterCount * kMessagesPerWriter * 2),
+      [&](const std::shared_ptr<Chatter>& msg) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto writer_index = static_cast<size_t>(msg->timestamp());
+        if (msg->seq() >= kWarmupSeqBase) {
+          warmup_writers.insert(writer_index);
+          return;
+        }
+        if (writer_index < messages_by_writer.size()) {
+          messages_by_writer[writer_index].push_back(*msg);
         }
       });
   ASSERT_NE(reader, nullptr);
 
-  auto talker_node = apollo::cyber::CreateNode(UniqueName("perf_talker"));
-  auto writer = talker_node->CreateWriter<Chatter>(channel_name_);
-  ASSERT_NE(writer, nullptr);
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-  const auto start = std::chrono::steady_clock::now();
-  for (size_t i = 0; i < kMessageCount; ++i) {
-    auto msg = std::make_shared<Chatter>();
-    msg->set_seq(i);
-    msg->set_content("perf");
-    msg->set_timestamp(i);
-    msg->set_lidar_timestamp(i);
-    ASSERT_TRUE(writer->Write(msg));
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  std::vector<std::shared_ptr<apollo::cyber::Node>> writer_nodes;
+  std::vector<std::shared_ptr<apollo::cyber::Writer<Chatter>>> writers;
+  writer_nodes.reserve(kWriterCount);
+  writers.reserve(kWriterCount);
+  for (size_t writer_index = 0; writer_index < kWriterCount; ++writer_index) {
+    writer_nodes.emplace_back(apollo::cyber::CreateNode(
+        UniqueName("fanin_talker_" + std::to_string(writer_index))));
+    auto writer = writer_nodes.back()->CreateWriter<Chatter>(channel_name_);
+    ASSERT_NE(writer, nullptr);
+    writers.emplace_back(std::move(writer));
   }
 
-  std::unique_lock<std::mutex> lock(mutex);
-  ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(5),
-                          [&received_count]() {
-                            return received_count >= kMessageCount;
-                          }));
+  for (size_t attempt = 0; attempt < 30; ++attempt) {
+    if (WaitFor(
+            [&]() {
+              std::lock_guard<std::mutex> lock(mutex);
+              return warmup_writers.size() == kWriterCount;
+            },
+            std::chrono::milliseconds(100))) {
+      break;
+    }
+    for (size_t writer_index = 0; writer_index < kWriterCount; ++writer_index) {
+      auto warmup = std::make_shared<Chatter>();
+      warmup->set_seq(kWarmupSeqBase + writer_index);
+      warmup->set_content("fanin_warmup_" + std::to_string(writer_index));
+      warmup->set_timestamp(writer_index);
+      ASSERT_TRUE(writers[writer_index]->Write(warmup));
+    }
+  }
 
-  const auto end_to_end =
-      std::chrono::duration_cast<std::chrono::milliseconds>(last_receive -
-                                                            start);
-  const auto receive_window =
-      std::chrono::duration_cast<std::chrono::milliseconds>(last_receive -
-                                                            first_receive);
-  EXPECT_LT(end_to_end.count(), 5000);
-  EXPECT_LT(receive_window.count(), 5000);
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return warmup_writers.size() == kWriterCount;
+      },
+      std::chrono::seconds(3)));
+
+  std::vector<std::thread> senders;
+  std::atomic<size_t> write_failures{0};
+  senders.reserve(kWriterCount);
+  for (size_t writer_index = 0; writer_index < kWriterCount; ++writer_index) {
+    senders.emplace_back([&, writer_index]() {
+      for (size_t seq = 0; seq < kMessagesPerWriter; ++seq) {
+        auto msg = std::make_shared<Chatter>();
+        msg->set_seq(seq);
+        msg->set_content(payloads[writer_index]);
+        msg->set_timestamp(writer_index);
+        msg->set_lidar_timestamp(seq + 500);
+        if (!writers[writer_index]->Write(msg)) {
+          ++write_failures;
+        }
+      }
+    });
+  }
+  for (auto& sender : senders) {
+    sender.join();
+  }
+  EXPECT_EQ(write_failures.load(), 0U);
+
+  ASSERT_TRUE(WaitFor(
+      [&]() {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& messages : messages_by_writer) {
+          if (messages.size() != kMessagesPerWriter) {
+            return false;
+          }
+        }
+        return true;
+      },
+      std::chrono::seconds(5)));
+
+  std::lock_guard<std::mutex> lock(mutex);
+  for (size_t writer_index = 0; writer_index < kWriterCount; ++writer_index) {
+    SCOPED_TRACE("writer_" + std::to_string(writer_index));
+    ASSERT_EQ(messages_by_writer[writer_index].size(), kMessagesPerWriter);
+    for (size_t seq = 0; seq < kMessagesPerWriter; ++seq) {
+      EXPECT_EQ(messages_by_writer[writer_index][seq].seq(), seq);
+      EXPECT_EQ(messages_by_writer[writer_index][seq].content(),
+                payloads[writer_index]);
+      EXPECT_EQ(messages_by_writer[writer_index][seq].timestamp(),
+                writer_index);
+      EXPECT_EQ(messages_by_writer[writer_index][seq].lidar_timestamp(),
+                seq + 500);
+    }
+  }
 }
 
-TEST_F(ExamplesIntegrationTest, ServiceClientRoundTrip) {
+TEST_F(ExamplesIntegrationTest, ServiceMultipleClientsRoundTrip) {
   auto server_node = apollo::cyber::CreateNode(UniqueName("service"));
   auto server = server_node->CreateService<Driver, Driver>(
-      service_name_,
-      [](const std::shared_ptr<Driver>& request,
-         std::shared_ptr<Driver>& response) {
-        response->set_content(request->content() + "_reply");
+      service_name_, [](const std::shared_ptr<Driver>& request,
+                        std::shared_ptr<Driver>& response) {
+        response->set_content(request->content());
         response->set_msg_id(request->msg_id() + 1);
         response->set_timestamp(request->timestamp() + 10);
       });
   ASSERT_NE(server, nullptr);
 
-  auto client_node = apollo::cyber::CreateNode(UniqueName("client"));
-  auto client = client_node->CreateClient<Driver, Driver>(service_name_);
-  ASSERT_NE(client, nullptr);
+  constexpr size_t kClientCount = 3;
+  constexpr size_t kRequestsPerClient = 8;
+  std::vector<std::shared_ptr<apollo::cyber::Node>> client_nodes;
+  std::vector<std::shared_ptr<apollo::cyber::Client<Driver, Driver>>> clients;
+  client_nodes.reserve(kClientCount);
+  clients.reserve(kClientCount);
+  for (size_t client_index = 0; client_index < kClientCount; ++client_index) {
+    client_nodes.emplace_back(apollo::cyber::CreateNode(
+        UniqueName("client_" + std::to_string(client_index))));
+    auto client =
+        client_nodes.back()->CreateClient<Driver, Driver>(service_name_);
+    ASSERT_NE(client, nullptr);
+    clients.emplace_back(std::move(client));
+  }
 
-  auto request = std::make_shared<Driver>();
-  request->set_content("ping");
-  request->set_msg_id(41);
-  request->set_timestamp(100);
+  for (size_t client_index = 0; client_index < kClientCount; ++client_index) {
+    auto warmup = std::make_shared<Driver>();
+    warmup->set_content(
+        MakePayload(32, static_cast<uint8_t>(client_index + 1)));
+    warmup->set_msg_id(client_index);
+    warmup->set_timestamp(client_index);
+    std::shared_ptr<Driver> response;
+    ASSERT_TRUE(WaitFor(
+        [&]() {
+          response = clients[client_index]->SendRequest(warmup);
+          return response != nullptr;
+        },
+        std::chrono::seconds(3)));
+    ASSERT_NE(response, nullptr);
+    EXPECT_EQ(response->content(), warmup->content());
+    EXPECT_EQ(response->msg_id(), warmup->msg_id() + 1);
+    EXPECT_EQ(response->timestamp(), warmup->timestamp() + 10);
+  }
 
-  std::shared_ptr<Driver> response;
-  ASSERT_TRUE(WaitFor(
-      [&]() {
-        response = client->SendRequest(request);
-        return response != nullptr;
-      },
-      std::chrono::seconds(3)));
+  std::atomic<size_t> failures{0};
+  std::vector<std::thread> workers;
+  workers.reserve(kClientCount);
+  for (size_t client_index = 0; client_index < kClientCount; ++client_index) {
+    workers.emplace_back([&, client_index]() {
+      for (size_t request_index = 0; request_index < kRequestsPerClient;
+           ++request_index) {
+        auto request = std::make_shared<Driver>();
+        request->set_content(MakePayload(
+            256 + client_index * 64 + request_index * 17,
+            static_cast<uint8_t>(client_index * 10 + request_index + 1)));
+        request->set_msg_id(client_index * 100 + request_index);
+        request->set_timestamp(client_index * 1000 + request_index);
+        auto response = clients[client_index]->SendRequest(request);
+        if (response == nullptr || response->content() != request->content() ||
+            response->msg_id() != request->msg_id() + 1 ||
+            response->timestamp() != request->timestamp() + 10) {
+          ++failures;
+        }
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
 
-  ASSERT_NE(response, nullptr);
-  EXPECT_EQ(response->content(), "ping_reply");
-  EXPECT_EQ(response->msg_id(), 42U);
-  EXPECT_EQ(response->timestamp(), 110U);
+  EXPECT_EQ(failures.load(), 0U);
 }
 
 }  // namespace

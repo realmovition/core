@@ -26,6 +26,9 @@ cc_test(
     name = "py_cyber_test",
     size = "small",
     srcs = ["py_cyber_test.cc"],
+    data = [
+        "//cyber:cyber_conf",
+    ],
     deps = [
         ":py_cyber",
         "//cyber/proto:unit_test_cc_proto",
@@ -81,7 +84,7 @@ cc_library(
     hdrs = ["py_time.h"],
     deps = [
         "//cyber:cyber_core",
-        "@fastdds",
+        "@fastdds//:fastdds",
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
     ],

@@ -9,7 +9,14 @@ build --registry=https://raw.githubusercontent.com/wheelos/bazel-central-registr
 
 # Enable Bzlmod for every Bazel command
 common --enable_bzlmod
+common:ci --color=yes
+common:ci --curses=no
+common:ci --show_progress_rate_limit=5
+common:lockfile-check --lockfile_mode=error
+common:lockfile-update --lockfile_mode=update
 
 # Compilation modes
 build:release --compilation_mode=opt --strip=always --copt=-O3
 build:debug --compilation_mode=dbg --copt=-g --copt=-O0
+build:ci --config=release
+test:ci --test_output=errors

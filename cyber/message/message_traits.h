@@ -23,6 +23,7 @@
 #include "cyber/common/log.h"
 #include "cyber/message/message_header.h"
 #include "cyber/message/protobuf_traits.h"
+#include "cyber/message/flatbuffers_message_traits.h"
 #include "cyber/message/py_message_traits.h"
 #include "cyber/message/raw_message_traits.h"
 
@@ -290,6 +291,12 @@ template <typename T,
           typename std::enable_if<!HasDescriptor<T>::value, bool>::type = 0>
 std::string GetMessageName() {
   return typeid(T).name();
+}
+
+template <typename T>
+std::string GetMessageName(const T& message) {
+  (void)message;
+  return GetMessageName<T>();
 }
 
 }  // namespace message

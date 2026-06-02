@@ -219,18 +219,18 @@ bool RecordWriter::WriteMessage(const std::string& channel_name,
                                 const MessageT& message,
                                 const uint64_t time_nanosec,
                                 const std::string& proto_desc) {
+  const auto message_name = message::GetMessageName(message);
   const std::string& message_type = GetMessageType(channel_name);
   if (message_type.empty()) {
-    if (!WriteChannel(channel_name, message::GetMessageName<MessageT>(),
-                      proto_desc)) {
+    if (!WriteChannel(channel_name, message_name, proto_desc)) {
       AERROR << "Failed to write meta data to channel [" << channel_name
              << "].";
       return false;
     }
   } else {
-    if (MessageT::descriptor()->full_name() != message_type) {
+    if (message_name != message_type) {
       AERROR << "Message type is invalid, expect: " << message_type
-             << ", actual: " << message::GetMessageName<MessageT>();
+             << ", actual: " << message_name;
       return false;
     }
   }

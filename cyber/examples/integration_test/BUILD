@@ -1,4 +1,10 @@
-load("@rules_cc//cc:defs.bzl", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "examples_test_utils",
+    hdrs = ["examples_test_utils.h"],
+    deps = ["//cyber:cyber_core"],
+)
 
 cc_test(
     name = "examples_integration_test",
@@ -8,6 +14,7 @@ cc_test(
     deps = [
         "//cyber:cyber_core",
         "//cyber/examples/proto:examples_cc_proto",
+        ":examples_test_utils",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -20,6 +27,7 @@ cc_test(
     deps = [
         "//cyber:cyber_core",
         "//cyber/examples/proto:examples_cc_proto",
+        ":examples_test_utils",
         "@com_google_googletest//:gtest",
     ],
 )
