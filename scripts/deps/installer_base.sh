@@ -252,7 +252,7 @@ function bash_ext() {
 function bazel_extended() {
   local actual_ext="$(file_ext $1)"
   if [[ -z "${actual_ext}" ]]; then
-    if [[  "$1" == "BUILD" ||  "$1" == "WORKSPACE" ]]; then
+    if [[  "$1" == "BUILD" ]]; then
       return 0
     else
       return 1

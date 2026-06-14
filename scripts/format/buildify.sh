@@ -19,7 +19,6 @@ function buildify() {
 
 	local build_dirs=(
 		"cyber"
-		"bazel"
 		"tools"
 	)
 
@@ -35,7 +34,6 @@ function buildify() {
 		#"${ROOT_DIR}/.bazelrc"
 		"${ROOT_DIR}/BUILD"
 		"${ROOT_DIR}/MODULE.bazel"
-		"${ROOT_DIR}/WORKSPACE"
 	)
 
 	for file in "${files[@]}"; do

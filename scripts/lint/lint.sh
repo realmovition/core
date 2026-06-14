@@ -120,7 +120,6 @@ function parse_cmdline_args() {
 function main() {
   # Restore environment
   sed -i 's/STATUS = 2/STATUS = 0/g' /apollo/tools/package/dynamic_deps.bzl
-  [[ -e "${TOP_DIR}/WORKSPACE.source" ]] && rm -f "${TOP_DIR}/WORKSPACE" && cp "${TOP_DIR}/WORKSPACE.source" "${TOP_DIR}/WORKSPACE"
 
   # Parse command line arguments and run corresponding lints
   parse_cmdline_args "$@"

@@ -4,7 +4,7 @@ bazel-*
 data
 
 *.lock
-!MODULE.bazel.lock
+MODULE.bazel.lock
 
 .pycyber-build-venv/
 artifacts/
