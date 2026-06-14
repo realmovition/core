@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  cyber-dev:
+    build:
+      context: ..
+      dockerfile: docker/dev.x86_64.dockerfile
+    container_name: ubuntu2204
+    image: cyber-core:latest
+    environment:
+      - HOST_USER=${HOST_USER}
+      - HOST_UID=${HOST_UID}
+      - HOST_GID=${HOST_GID}
+    volumes:
+      - ..:/workspace
+      - ${HOME}/.cache/bazel-apollo-docker:/home/${HOST_USER}/.cache/bazel
+    working_dir: /workspace
+    ipc: host
+    network_mode: host
+    privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    tty: true
+    stdin_open: true
+    restart: unless-stopped

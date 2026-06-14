@@ -153,7 +153,11 @@ TEST_F(ShmTransceiverTest, enable_and_disable) {
 }  // namespace cyber
 }  // namespace apollo
 
+#include <filesystem>
+
 int main(int argc, char** argv) {
+  const auto cyber_path = (std::filesystem::current_path() / "cyber").string();
+  setenv("CYBER_PATH", cyber_path.c_str(), 1);
   testing::InitGoogleTest(&argc, argv);
   apollo::cyber::Init(argv[0]);
   apollo::cyber::transport::Transport::Instance();

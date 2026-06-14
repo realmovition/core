@@ -20,6 +20,7 @@
 #include "cyber/common/log.h"
 #include "cyber/message/message_traits.h"
 #include "cyber/time/time.h"
+#include "cyber/state.h"
 #include "cyber/transport/qos/qos_profile_conf.h"
 #include "cyber/transport/rtps/attributes_filler.h"
 #include "cyber/transport/rtps/underlay_message.h"
@@ -67,16 +68,24 @@ void Manager::StopDiscovery() {
     return;
   }
 
-  {
-    std::lock_guard<std::mutex> lg(lock_);
-    if (publisher_ != nullptr) {
-      eprosima::fastrtps::Domain::removePublisher(publisher_);
+  if (!apollo::cyber::IsShutdown()) {
+    {
+      std::lock_guard<std::mutex> lg(lock_);
+      if (publisher_ != nullptr) {
+        eprosima::fastrtps::Domain::removePublisher(publisher_);
+        publisher_ = nullptr;
+      }
+    }
+
+    if (subscriber_ != nullptr) {
+      eprosima::fastrtps::Domain::removeSubscriber(subscriber_);
+      subscriber_ = nullptr;
+    }
+  } else {
+    {
+      std::lock_guard<std::mutex> lg(lock_);
       publisher_ = nullptr;
     }
-  }
-
-  if (subscriber_ != nullptr) {
-    eprosima::fastrtps::Domain::removeSubscriber(subscriber_);
     subscriber_ = nullptr;
   }
 

@@ -108,7 +108,7 @@ bool AttributesFiller::FillInPubAttr(
   }
 
   pub_attr->qos.m_publishMode.kind =
-      eprosima::fastrtps::ASYNCHRONOUS_PUBLISH_MODE;
+      eprosima::fastrtps::SYNCHRONOUS_PUBLISH_MODE;
   pub_attr->historyMemoryPolicy =
       eprosima::fastrtps::rtps::DYNAMIC_RESERVE_MEMORY_MODE;
   pub_attr->topic.resourceLimitsQos.max_samples = 10000;

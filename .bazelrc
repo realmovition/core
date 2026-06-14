@@ -1,6 +1,6 @@
 # Common build options
 build --cxxopt="-std=c++17"
-build --jobs=4
+build --jobs=8
 build --verbose_failures
 build --keep_going
 

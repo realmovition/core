@@ -145,6 +145,11 @@ function download_if_not_cached {
 
     echo -e "${pkg_name}\t${expected_cs}\t${url}" >> "${DOWNLOAD_LOG}"
 
+    if [ -f "${pkg_name}" ] && _checksum_check_pass "${pkg_name}" "${expected_cs}"; then
+        ok "File ${pkg_name} already exists locally with correct checksum. Skipping download."
+        return
+    fi
+
     if _local_http_cached "${pkg_name}" ; then
         local local_addr="${LOCAL_HTTP_ADDR}/${pkg_name}"
         info "Local http cache hit ${pkg_name}..."

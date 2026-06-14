@@ -41,7 +41,9 @@ void Participant::Shutdown() {
 
   std::lock_guard<std::mutex> lk(mutex_);
   if (fastrtps_participant_ != nullptr) {
-    eprosima::fastrtps::Domain::removeParticipant(fastrtps_participant_);
+    if (listener_ == nullptr) {
+      eprosima::fastrtps::Domain::removeParticipant(fastrtps_participant_);
+    }
     fastrtps_participant_ = nullptr;
     listener_ = nullptr;
   }
@@ -84,12 +86,11 @@ void Participant::CreateFastRtpsParticipant(
   }
 
   eprosima::fastrtps::ParticipantAttributes attr;
-  // attr.rtps.defaultSendPort = send_port;
   attr.rtps.port.domainIDGain =
       static_cast<uint16_t>(part_attr_conf->domain_id_gain());
   attr.rtps.port.portBase = static_cast<uint16_t>(part_attr_conf->port_base());
-  // attr.rtps.use_IP6_to_send = false;
-  // attr.rtps.builtin.discovery_config.use_SIMPLE_RTPSParticipantDiscoveryProtocol = true;
+  attr.rtps.builtin.avoid_builtin_multicast = true;
+  
   attr.rtps.builtin.discovery_config.use_SIMPLE_EndpointDiscoveryProtocol = true;
   attr.rtps.builtin.discovery_config.m_simpleEDP.use_PublicationReaderANDSubscriptionWriter =
       true;
@@ -120,18 +121,34 @@ void Participant::CreateFastRtpsParticipant(
   }
   ADEBUG << "cyber ip: " << ip_env;
 
-  eprosima::fastrtps::rtps::Locator_t locator;
-  locator.port = 0;
-  RETURN_IF(!eprosima::fastrtps::rtps::IPLocator::setIPv4(locator, ip_env));
+  RETURN_IF(send_port <= 0);
+  const auto process_id = common::GlobalData::Instance()->ProcessId();
+  constexpr uint32_t kParticipantIdRange = 128;
+  const uint32_t participant_id =
+      ((process_id % kParticipantIdRange) * 2) + ((send_port == 11512) ? 1 : 0);
+  attr.rtps.participantID = static_cast<int32_t>(participant_id);
 
-  locator.kind = LOCATOR_KIND_UDPv4;
+  eprosima::fastrtps::rtps::Locator_t metatraffic_unicast_locator;
+  metatraffic_unicast_locator.kind = LOCATOR_KIND_UDPv4;
+  RETURN_IF(!eprosima::fastrtps::rtps::IPLocator::setIPv4(
+      metatraffic_unicast_locator, ip_env));
+  RETURN_IF(!eprosima::fastrtps::rtps::IPLocator::setPhysicalPort(
+      metatraffic_unicast_locator, static_cast<uint16_t>(
+                                       attr.rtps.port.getUnicastPort(
+                                           domain_id, participant_id))));
+  attr.rtps.defaultUnicastLocatorList.push_back(metatraffic_unicast_locator);
+  attr.rtps.builtin.metatrafficUnicastLocatorList.push_back(
+      metatraffic_unicast_locator);
 
-  attr.rtps.defaultUnicastLocatorList.push_back(locator);
-  attr.rtps.defaultMulticastLocatorList.push_back(locator);
-  attr.rtps.builtin.metatrafficUnicastLocatorList.push_back(locator);
-
-  eprosima::fastrtps::rtps::IPLocator::setIPv4(locator, "239.255.0.1");
-  attr.rtps.builtin.metatrafficMulticastLocatorList.push_back(locator);
+  for (uint32_t id = 0; id < (kParticipantIdRange * 2); ++id) {
+    eprosima::fastrtps::rtps::Locator_t peer_locator;
+    peer_locator.kind = LOCATOR_KIND_UDPv4;
+    RETURN_IF(!eprosima::fastrtps::rtps::IPLocator::setIPv4(peer_locator, ip_env));
+    RETURN_IF(!eprosima::fastrtps::rtps::IPLocator::setPhysicalPort(
+        peer_locator, static_cast<uint16_t>(
+                          attr.rtps.port.getUnicastPort(domain_id, id))));
+    attr.rtps.builtin.initialPeersList.push_back(peer_locator);
+  }
 
   fastrtps_participant_ =
       eprosima::fastrtps::Domain::createParticipant(attr, listener);

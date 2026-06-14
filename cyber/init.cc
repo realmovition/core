@@ -80,7 +80,11 @@ void InitLogger(const char* binary_name) {
   async_logger->Start();
 }
 
-void StopLogger() { delete async_logger; }
+void StopLogger() {
+  if (async_logger != nullptr) {
+    async_logger->Stop();
+  }
+}
 
 }  // namespace
 
@@ -135,12 +139,17 @@ void Clear() {
   if (GetState() == STATE_SHUTDOWN || GetState() == STATE_UNINITIALIZED) {
     return;
   }
+  SetState(STATE_SHUTTING_DOWN);
+  if (clock_node) {
+      clock_node.reset();
+  }
+
   SysMo::CleanUp();
   TaskManager::CleanUp();
   TimingWheel::CleanUp();
   scheduler::CleanUp();
-  service_discovery::TopologyManager::CleanUp();
   transport::Transport::CleanUp();
+  service_discovery::TopologyManager::CleanUp();
   StopLogger();
   SetState(STATE_SHUTDOWN);
 }

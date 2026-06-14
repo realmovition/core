@@ -110,14 +110,12 @@ void GlobalData::InitHostInfo() {
 
   host_ip_ = "127.0.0.1";
 
-  // if we have exported a non-loopback CYBER_IP, we will use it firstly,
+  // if we have exported a CYBER_IP, we will use it firstly,
   // otherwise, we try to find first non-loopback ipv4 addr.
   const char* ip_env = getenv("CYBER_IP");
   if (ip_env != nullptr) {
-    // maybe we need to verify ip_env
     std::string ip_env_str(ip_env);
-    std::string starts = ip_env_str.substr(0, 3);
-    if (starts != "127") {
+    if (!ip_env_str.empty()) {
       host_ip_ = ip_env_str;
       AINFO << "host ip: " << host_ip_;
       return;
