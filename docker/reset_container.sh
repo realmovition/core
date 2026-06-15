@@ -1,27 +1,45 @@
 #!/bin/bash
+set -euo pipefail
 
-# Determine the directory of this script
+# Define colors
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${BLUE}🛠 Initializing development environment...${NC}"
+
+# Change to project root directory
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "${DIR}/.."
+ROOT_DIR="${DIR}/.."
+cd "${ROOT_DIR}"
 
-export HOST_USER=$(id -un)
-export HOST_UID=$(id -u)
-export HOST_GID=$(id -g)
-BAZEL_CACHE="${HOME}/.cache/bazel-apollo-docker"
+# 1. Auto-generate .env file (for Docker Compose)
+cat <<EOF > .env
+HOST_USER=$(id -un)
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+BAZEL_CACHE=${HOME}/.cache/bazel-apollo-docker
+EOF
+echo -e "✅ .env configuration file generated"
 
-mkdir -p "${BAZEL_CACHE}"
+# 2. Ensure host Bazel cache dir exists to avoid Docker creating it as root
+mkdir -p "${HOME}/.cache/bazel-apollo-docker"
 
-echo "🔄 正在清理并重新部署容器 (Docker Compose)..."
+echo -e "${BLUE}🔄 Cleaning and redeploying containers...${NC}"
+# Clean old containers and orphan networks
+docker compose --env-file .env -f docker/docker-compose.yml down --remove-orphans >/dev/null 2>&1
 
-# 1. 停止并删除旧容器 (包括可能重名的非compose容器)
-docker rm -f ubuntu2204 >/dev/null 2>&1
-docker compose -f docker/docker-compose.yml down -v
+# Build and start
+docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 
-# 2. 构建并启动新容器
-docker compose -f docker/docker-compose.yml up -d --build
-
-echo "------------------------------------------------"
-echo "容器更新并启动成功！"
-echo "运行 ./docker/enter_container.sh 进入！"
-echo "------------------------------------------------"
-
+# 3. Verify status
+if [ "$(docker compose --env-file .env -f docker/docker-compose.yml ps -q cyber-dev)" ]; then
+    echo -e "------------------------------------------------"
+    echo -e "${GREEN}🚀 Container updated and started successfully!${NC}"
+    echo -e "👉 Run ${BLUE}bash docker/enter_container.sh${NC} to enter the environment"
+    echo -e "------------------------------------------------"
+else
+    echo -e "${RED}❌ Container failed to start; check 'docker compose logs' for details.${NC}"
+    exit 1
+fi

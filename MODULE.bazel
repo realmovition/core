@@ -1,22 +1,8 @@
-###############################################################################
-# Bazel now uses Bzlmod by default to manage external dependencies.
-# Please consider migrating your external dependencies from WORKSPACE to MODULE.bazel.
-#
-# For more details, please check https://github.com/bazelbuild/bazel/issues/18958
-###############################################################################
-
 module(
     name = "core",
     version = "1.0.0",
     compatibility_level = 1,
 )
-
-# LOWER BOUND dependency versions.
-# Bzlmod follows MVS:
-# https://bazel.build/versions/6.0.0/build/bzlmod#version-resolution
-# Thus the highest version in their module graph is resolved.
-
-# https://registry.bazel.build/
 
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "rules_cc", version = "0.0.9")

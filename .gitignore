@@ -17,3 +17,4 @@ __pycache__/
 packaging/pycyber/.pytest_cache/
 
 scripts/release/__pycache__
+.env

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   cyber-dev:
     build:
@@ -7,13 +5,19 @@ services:
       dockerfile: docker/dev.x86_64.dockerfile
     container_name: ubuntu2204
     image: cyber-core:latest
+
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+
     environment:
-      - HOST_USER=${HOST_USER}
-      - HOST_UID=${HOST_UID}
-      - HOST_GID=${HOST_GID}
+      - HOST_USER=${HOST_USER:-developer}
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
+      - HOME=/home/${HOST_USER:-developer}
+      
     volumes:
       - ..:/workspace
-      - ${HOME}/.cache/bazel-apollo-docker:/home/${HOST_USER}/.cache/bazel
+      - ${BAZEL_CACHE:-/tmp/bazel-apollo-docker}:/home/${HOST_USER:-developer}/.cache/bazel
+      
     working_dir: /workspace
     ipc: host
     network_mode: host
