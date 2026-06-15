@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Define colors
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
 RED='\033[0;31m'
@@ -9,31 +8,46 @@ NC='\033[0m'
 
 echo -e "${BLUE}🛠 Initializing development environment...${NC}"
 
-# Change to project root directory
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT_DIR="${DIR}/.."
 cd "${ROOT_DIR}"
 
-# 1. Auto-generate .env file (for Docker Compose)
+# user info
+USER_NAME=$(id -un)
+USER_UID=$(id -u)
+USER_GID=$(id -g)
+
+PASSWD_FILE="/tmp/wheelos-docker-passwd-${USER_NAME}"
+GROUP_FILE="/tmp/wheelos-docker-group-${USER_NAME}"
+
 cat <<EOF > .env
-HOST_USER=$(id -un)
-HOST_UID=$(id -u)
-HOST_GID=$(id -g)
+HOST_USER=${USER_NAME}
+HOST_UID=${USER_UID}
+HOST_GID=${USER_GID}
 BAZEL_CACHE=${HOME}/.cache/bazel-apollo-docker
+PASSWD_FILE=${PASSWD_FILE}
+GROUP_FILE=${GROUP_FILE}
 EOF
 echo -e "✅ .env configuration file generated"
 
-# 2. Ensure host Bazel cache dir exists to avoid Docker creating it as root
+# 2. host directory setup for bazel cache and container home
 mkdir -p "${HOME}/.cache/bazel-apollo-docker"
+mkdir -p "${HOME}/.apollo_container_home"
+
+# 3. dynamically generate passwd/group files
+cat > "${PASSWD_FILE}" <<EOF
+root:x:0:0:root:/root:/bin/bash
+${USER_NAME}:x:${USER_UID}:${USER_GID}:${USER_NAME}:/home/${USER_NAME}:/bin/bash
+EOF
+cat > "${GROUP_FILE}" <<EOF
+root:x:0:
+${USER_NAME}:x:${USER_GID}:
+EOF
 
 echo -e "${BLUE}🔄 Cleaning and redeploying containers...${NC}"
-# Clean old containers and orphan networks
 docker compose --env-file .env -f docker/docker-compose.yml down --remove-orphans >/dev/null 2>&1
-
-# Build and start
 docker compose --env-file .env -f docker/docker-compose.yml up -d --build
 
-# 3. Verify status
 if [ "$(docker compose --env-file .env -f docker/docker-compose.yml ps -q cyber-dev)" ]; then
     echo -e "------------------------------------------------"
     echo -e "${GREEN}🚀 Container updated and started successfully!${NC}"

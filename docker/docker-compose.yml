@@ -17,9 +17,11 @@ services:
     volumes:
       - ..:/workspace
       - ${BAZEL_CACHE:-/tmp/bazel-apollo-docker}:/home/${HOST_USER:-developer}/.cache/bazel
+      - ${PASSWD_FILE:-/tmp/wheelos-docker-passwd}:/etc/passwd:ro
+      - ${GROUP_FILE:-/tmp/wheelos-docker-group}:/etc/group:ro
       
     working_dir: /workspace
-    ipc: host
+    ipc: private
     network_mode: host
     privileged: true
     deploy:

@@ -21,11 +21,12 @@ fi
 
 echo "🚀 Entering container as [${HOST_USER}]..."
 
-# Enter container with numeric UID:GID to keep strict non-root mode and avoid
-# username lookup dependency in /etc/passwd.
+# Enter container with numeric UID:GID; passwd/group mounts provide name lookup.
 CUSTOM_PS1="${HOST_USER}@cyber-dev:\\w\\$ "
 docker compose --env-file .env -f docker/docker-compose.yml exec \
   --user "${HOST_UID}:${HOST_GID}" \
   -e HOME="/home/${HOST_USER}" \
   -e USER="${HOST_USER}" \
-  cyber-dev env PS1="${CUSTOM_PS1}" /bin/bash --noprofile --norc -i
+  -e TERM="${TERM:-xterm-256color}" \
+  -e PS1="${CUSTOM_PS1}" \
+  cyber-dev /bin/bash -i
