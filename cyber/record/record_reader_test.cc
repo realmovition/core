@@ -21,35 +21,29 @@
 
 #include "gtest/gtest.h"
 
-#include "cyber/examples/proto/examples_generated.h"
-#include "cyber/message/flatbuffers_message.h"
 #include "cyber/record/record_writer.h"
+#include "cyber/transport/message/pod_message.h"
 
 namespace apollo {
 namespace cyber {
 namespace record {
 
-using apollo::cyber::message::FlatBufferMessage;
 using apollo::cyber::message::RawMessage;
+using apollo::cyber::transport::BuildPodChunk;
+using apollo::cyber::transport::MakeImagePodChunkHeader;
+using apollo::cyber::transport::ParsePodChunk;
+using apollo::cyber::transport::PodChunkHeader;
+using apollo::cyber::transport::PodChunkView;
+using apollo::cyber::transport::PodMessage;
 
 constexpr char kChannelName1[] = "/test/channel1";
 constexpr char kMessageType1[] = "apollo.cyber.proto.Test";
 constexpr char kProtoDesc[] = "1234567890";
 constexpr char kStr10B[] = "1234567890";
 constexpr char kTestFile[] = "record_reader_test.record";
-constexpr char kFlatBufferChannelName[] = "/test/channel_flatbuffer";
-constexpr char kFlatBufferMessageType[] = "apollo.cyber.examples.proto.Chatter";
-constexpr char kFlatBufferTestFile[] = "record_reader_flatbuffer_test.record";
+constexpr char kPodChannelName[] = "/test/channel_pod";
+constexpr char kPodTestFile[] = "record_reader_pod_test.record";
 constexpr uint32_t kMessageNum = 16;
-
-static std::vector<uint8_t> BuildChatterBuffer(uint64_t seq,
-                                               const char* content) {
-  flatbuffers::FlatBufferBuilder fbb;
-  auto chatter =
-      examples::proto::CreateChatterDirect(fbb, 1000, 2000, seq, content);
-  fbb.Finish(chatter);
-  return {fbb.GetBufferPointer(), fbb.GetBufferPointer() + fbb.GetSize()};
-}
 
 TEST(RecordTest, TestSingleRecordFile) {
   RecordWriter writer;
@@ -104,42 +98,44 @@ TEST(RecordTest, TestSingleRecordFile) {
   ASSERT_FALSE(remove(kTestFile));
 }
 
-TEST(RecordTest, TestFlatBufferRecordMetadataUsesConcreteTypeName) {
-  auto buf = BuildChatterBuffer(7, "record-flatbuffer");
-  FlatBufferMessage message(kFlatBufferMessageType, buf.data(), buf.size());
+TEST(RecordTest, TestPodMessageBinaryRecordRoundtrip) {
+  const std::vector<uint8_t> payload = {1, 2, 3, 4, 5, 0, 7, 8};
+  const auto header = MakeImagePodChunkHeader(
+      /*timestamp_ns=*/987654321, /*frame_id=*/77, /*width=*/640,
+      /*height=*/480, /*stride_bytes=*/1920, /*pixel_format=*/24,
+      static_cast<uint32_t>(payload.size()), /*schema_hash=*/0x11223344);
+
+  std::vector<uint8_t> chunk(sizeof(header) + payload.size());
+  std::size_t written = 0;
+  ASSERT_TRUE(BuildPodChunk(header, payload.data(), payload.size(),
+                            chunk.data(), chunk.size(), &written));
+
+  PodMessage pod_message;
+  ASSERT_TRUE(pod_message.ParseFromArray(chunk.data(), static_cast<int>(chunk.size())));
 
   RecordWriter writer;
   writer.SetSizeOfFileSegmentation(0);
   writer.SetIntervalOfFileSegmentation(0);
-  writer.Open(kFlatBufferTestFile);
-  ASSERT_TRUE(writer.WriteMessage(kFlatBufferChannelName, message, 123u));
-  ASSERT_EQ(1u, writer.GetMessageNumber(kFlatBufferChannelName));
-  ASSERT_EQ(kFlatBufferMessageType,
-            writer.GetMessageType(kFlatBufferChannelName));
-  EXPECT_EQ("", writer.GetProtoDesc(kFlatBufferChannelName));
+  writer.Open(kPodTestFile);
+  ASSERT_TRUE(writer.WriteMessage(kPodChannelName, pod_message, 987654321u));
   writer.Close();
 
-  RecordReader reader(kFlatBufferTestFile);
-  ASSERT_EQ(1u, reader.GetMessageNumber(kFlatBufferChannelName));
-  ASSERT_EQ(kFlatBufferMessageType,
-            reader.GetMessageType(kFlatBufferChannelName));
-  EXPECT_EQ("", reader.GetProtoDesc(kFlatBufferChannelName));
-
+  RecordReader reader(kPodTestFile);
   RecordMessage record_message;
   ASSERT_TRUE(reader.ReadMessage(&record_message));
-  EXPECT_EQ(kFlatBufferChannelName, record_message.channel_name);
-  EXPECT_EQ(123u, record_message.time);
+  EXPECT_EQ(kPodChannelName, record_message.channel_name);
+  EXPECT_EQ(987654321u, record_message.time);
 
-  FlatBufferMessage decoded(
-      kFlatBufferMessageType,
-      reinterpret_cast<const uint8_t*>(record_message.content.data()),
-      record_message.content.size());
-  const auto* chatter = decoded.GetRoot<examples::proto::Chatter>();
-  ASSERT_NE(chatter, nullptr);
-  EXPECT_EQ(chatter->seq(), 7u);
-  EXPECT_STREQ(chatter->content()->c_str(), "record-flatbuffer");
+  PodMessage decoded;
+  ASSERT_TRUE(decoded.ParseFromString(record_message.content));
+  ASSERT_NE(decoded.header(), nullptr);
+  EXPECT_EQ(decoded.header()->magic, PodChunkHeader::kMagic);
+  EXPECT_EQ(decoded.header()->frame_id, 77u);
+  PodChunkView view = decoded.View();
+  ASSERT_NE(view.payload, nullptr);
+  EXPECT_EQ(0, std::memcmp(view.payload, payload.data(), payload.size()));
   ASSERT_FALSE(reader.ReadMessage(&record_message));
-  ASSERT_FALSE(remove(kFlatBufferTestFile));
+  ASSERT_FALSE(remove(kPodTestFile));
 }
 
 TEST(RecordTest, TestReaderOrder) {

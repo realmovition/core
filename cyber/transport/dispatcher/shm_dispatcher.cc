@@ -41,6 +41,11 @@ void ShmDispatcher::Shutdown() {
 
   {
     ReadLockGuard<AtomicRWLock> lock(segments_lock_);
+    for (const auto& item : segments_) {
+      AINFO << "shm segment pressure for channel["
+            << common::GlobalData::GetChannelById(item.first)
+            << "]: write_busy_count=" << item.second->WriteBusyCount();
+    }
     segments_.clear();
   }
 }
@@ -68,6 +73,12 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index) {
           << " index: " << block_index;
     return;
   }
+  auto segment = segments_[channel_id];
+  ReadableBlock readable_block = *rb;
+  rb->release_guard = std::shared_ptr<void>(
+      nullptr, [segment, readable_block](void*) {
+        segment->ReleaseReadBlock(readable_block);
+      });
 
   MessageInfo msg_info;
   const char* msg_info_addr =
@@ -79,7 +90,6 @@ void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index) {
     AERROR << "error msg info of channel:"
            << GlobalData::GetChannelById(channel_id);
   }
-  segments_[channel_id]->ReleaseReadBlock(*rb);
 }
 
 void ShmDispatcher::OnMessage(uint64_t channel_id,

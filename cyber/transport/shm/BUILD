@@ -94,6 +94,7 @@ cc_library(
     hdrs = ["segment.h"],
     deps = [
         ":block",
+        ":profile",
         ":shm_conf",
         ":state",
         "//cyber/common:log",
@@ -127,6 +128,24 @@ cc_library(
     name = "state",
     srcs = ["state.cc"],
     hdrs = ["state.h"],
+)
+
+cc_library(
+    name = "profile",
+    hdrs = ["profile.h"],
+    deps = [
+        "//cyber/common:global_data",
+    ],
+)
+
+cc_test(
+    name = "profile_test",
+    size = "small",
+    srcs = ["profile_test.cc"],
+    deps = [
+        "//cyber:cyber_core",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_test(

@@ -34,6 +34,7 @@
 #include "cyber/transport/message/history.h"
 #include "cyber/transport/rtps/participant.h"
 #include "cyber/transport/transmitter/intra_transmitter.h"
+#include "cyber/transport/transmitter/iceoryx_transmitter.h"
 #include "cyber/transport/transmitter/rtps_transmitter.h"
 #include "cyber/transport/transmitter/shm_transmitter.h"
 #include "cyber/transport/transmitter/transmitter.h"
@@ -45,6 +46,33 @@ namespace transport {
 using apollo::cyber::proto::OptionalMode;
 using apollo::cyber::proto::QosDurabilityPolicy;
 using apollo::cyber::proto::RoleAttributes;
+
+namespace {
+
+inline void NormalizeHybridTransmitterCommunicationMode(
+    proto::CommunicationMode* mode) {
+  if (mode == nullptr) {
+    return;
+  }
+  if (mode->same_proc() != OptionalMode::INTRA) {
+    AERROR << "invalid same_proc transport mode "
+           << static_cast<int>(mode->same_proc())
+           << ", forcing INTRA for same-process delivery";
+    mode->set_same_proc(OptionalMode::INTRA);
+  }
+  if (mode->diff_proc() == OptionalMode::INTRA) {
+    AERROR << "invalid diff_proc transport mode INTRA, forcing ICEORYX";
+    mode->set_diff_proc(OptionalMode::ICEORYX);
+  }
+  if (mode->diff_host() != OptionalMode::RTPS) {
+    AERROR << "invalid diff_host transport mode "
+           << static_cast<int>(mode->diff_host())
+           << ", forcing RTPS for cross-host delivery";
+    mode->set_diff_host(OptionalMode::RTPS);
+  }
+}
+
+}  // namespace
 
 template <typename M>
 class HybridTransmitter : public Transmitter<M> {
@@ -70,8 +98,12 @@ class HybridTransmitter : public Transmitter<M> {
   void Disable(const RoleAttributes& opposite_attr) override;
 
   bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) override;
+  bool IsLoanSupported() const override;
+  bool Loan(std::size_t size, LoanedMessage<M>* loaned_msg) override;
+  bool Publish(LoanedMessage<M>&& loaned_msg) override;
 
  private:
+  bool HasActiveReceiversOnly(OptionalMode mode) const;
   void InitMode();
   void ObtainConfig();
   void InitHistory();
@@ -165,15 +197,88 @@ bool HybridTransmitter<M>::Transmit(const MessagePtr& msg,
                                     const MessageInfo& msg_info) {
   std::lock_guard<std::mutex> lock(mutex_);
   history_->Add(msg, msg_info);
+  bool expected_delivery = false;
+  bool delivered = false;
   for (auto& item : transmitters_) {
-    item.second->Transmit(msg, msg_info);
+    const auto mode = item.first;
+    const auto receiver_it = receivers_.find(mode);
+    const bool has_targets =
+        receiver_it != receivers_.end() && !receiver_it->second.empty();
+    if (!has_targets) {
+      continue;
+    }
+    expected_delivery = true;
+    if (item.second->Transmit(msg, msg_info)) {
+      delivered = true;
+    } else {
+      AERROR << "hybrid transmit failed: channel=" << this->attr_.channel_name()
+             << " mode=" << static_cast<int>(mode);
+    }
   }
-  return true;
+  if (!expected_delivery) {
+    return true;
+  }
+  return delivered;
+}
+
+template <typename M>
+bool HybridTransmitter<M>::IsLoanSupported() const {
+  auto it = transmitters_.find(OptionalMode::ICEORYX);
+  return it != transmitters_.end() && it->second != nullptr &&
+         it->second->IsLoanSupported();
+}
+
+template <typename M>
+bool HybridTransmitter<M>::HasActiveReceiversOnly(OptionalMode mode) const {
+  bool has_target = false;
+  for (const auto& item : receivers_) {
+    if (item.second.empty()) {
+      continue;
+    }
+    if (item.first != mode) {
+      return false;
+    }
+    has_target = true;
+  }
+  return has_target;
+}
+
+template <typename M>
+bool HybridTransmitter<M>::Loan(std::size_t size, LoanedMessage<M>* loaned_msg) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = transmitters_.find(OptionalMode::ICEORYX);
+  if (it != transmitters_.end() && it->second != nullptr &&
+      HasActiveReceiversOnly(OptionalMode::ICEORYX)) {
+    return it->second->Loan(size, loaned_msg);
+  }
+  it = transmitters_.find(OptionalMode::SHM);
+  if (it != transmitters_.end() && it->second != nullptr &&
+      HasActiveReceiversOnly(OptionalMode::SHM)) {
+    return it->second->Loan(size, loaned_msg);
+  }
+  return false;
+}
+
+template <typename M>
+bool HybridTransmitter<M>::Publish(LoanedMessage<M>&& loaned_msg) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = transmitters_.find(OptionalMode::ICEORYX);
+  if (it != transmitters_.end() && it->second != nullptr &&
+      HasActiveReceiversOnly(OptionalMode::ICEORYX)) {
+    return it->second->Publish(std::move(loaned_msg));
+  }
+  it = transmitters_.find(OptionalMode::SHM);
+  if (it != transmitters_.end() && it->second != nullptr &&
+      HasActiveReceiversOnly(OptionalMode::SHM)) {
+    return it->second->Publish(std::move(loaned_msg));
+  }
+  return false;
 }
 
 template <typename M>
 void HybridTransmitter<M>::InitMode() {
   mode_ = std::make_shared<proto::CommunicationMode>();
+  NormalizeHybridTransmitterCommunicationMode(mode_.get());
   mapping_table_[SAME_PROC] = mode_->same_proc();
   mapping_table_[DIFF_PROC] = mode_->diff_proc();
   mapping_table_[DIFF_HOST] = mode_->diff_host();
@@ -189,6 +294,7 @@ void HybridTransmitter<M>::ObtainConfig() {
     return;
   }
   mode_->CopyFrom(global_conf.transport_conf().communication_mode());
+  NormalizeHybridTransmitterCommunicationMode(mode_.get());
 
   mapping_table_[SAME_PROC] = mode_->same_proc();
   mapping_table_[DIFF_PROC] = mode_->diff_proc();
@@ -220,6 +326,10 @@ void HybridTransmitter<M>::InitTransmitters() {
         break;
       case OptionalMode::SHM:
         transmitters_[mode] = std::make_shared<ShmTransmitter<M>>(this->attr_);
+        break;
+      case OptionalMode::ICEORYX:
+        transmitters_[mode] =
+            std::make_shared<IceoryxTransmitter<M>>(this->attr_);
         break;
       default:
         transmitters_[mode] =

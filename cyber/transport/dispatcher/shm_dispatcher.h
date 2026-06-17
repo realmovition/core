@@ -29,6 +29,7 @@
 #include "cyber/common/macros.h"
 #include "cyber/message/message_traits.h"
 #include "cyber/transport/dispatcher/dispatcher.h"
+#include "cyber/transport/message/pod_message.h"
 #include "cyber/transport/shm/notifier_factory.h"
 #include "cyber/transport/shm/segment_factory.h"
 
@@ -96,7 +97,7 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
 
 template <typename MessageT>
 void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
-                                const RoleAttributes& opposite_attr,
+                               const RoleAttributes& opposite_attr,
                                 const MessageListener<MessageT>& listener) {
   // FIXME: make it more clean
   auto listener_adapter = [listener](const std::shared_ptr<ReadableBlock>& rb,
@@ -104,6 +105,49 @@ void ShmDispatcher::AddListener(const RoleAttributes& self_attr,
     auto msg = std::make_shared<MessageT>();
     RETURN_IF(!message::ParseFromArray(
         rb->buf, static_cast<int>(rb->block->msg_size()), msg.get()));
+    listener(msg, msg_info);
+  };
+
+  Dispatcher::AddListener<ReadableBlock>(self_attr, opposite_attr,
+                                         listener_adapter);
+  AddSegment(self_attr);
+}
+
+template <>
+inline void ShmDispatcher::AddListener<PodMessage>(
+    const RoleAttributes& self_attr,
+    const MessageListener<PodMessage>& listener) {
+  const std::string message_type = self_attr.message_type();
+  auto listener_adapter = [listener, message_type](
+                              const std::shared_ptr<ReadableBlock>& rb,
+                              const MessageInfo& msg_info) {
+    auto msg = std::make_shared<PodMessage>();
+    RETURN_IF(!msg->ParseFromArray(rb->buf,
+                                   static_cast<int>(rb->block->msg_size())));
+    if (!message_type.empty()) {
+      msg->set_type_name(message_type);
+    }
+    listener(msg, msg_info);
+  };
+
+  Dispatcher::AddListener<ReadableBlock>(self_attr, listener_adapter);
+  AddSegment(self_attr);
+}
+
+template <>
+inline void ShmDispatcher::AddListener<PodMessage>(
+    const RoleAttributes& self_attr, const RoleAttributes& opposite_attr,
+    const MessageListener<PodMessage>& listener) {
+  const std::string message_type = self_attr.message_type();
+  auto listener_adapter = [listener, message_type](
+                              const std::shared_ptr<ReadableBlock>& rb,
+                              const MessageInfo& msg_info) {
+    auto msg = std::make_shared<PodMessage>();
+    RETURN_IF(!msg->ParseFromArray(rb->buf,
+                                   static_cast<int>(rb->block->msg_size())));
+    if (!message_type.empty()) {
+      msg->set_type_name(message_type);
+    }
     listener(msg, msg_info);
   };
 

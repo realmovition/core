@@ -42,6 +42,7 @@ class State {
   }
 
   void IncreaseReferenceCounts() { reference_count_.fetch_add(1); }
+  void IncreaseWriteBusyCount() { write_busy_count_.fetch_add(1); }
 
   uint32_t FetchAddSeq(uint32_t diff) { return seq_.fetch_add(diff); }
   uint32_t seq() { return seq_.load(); }
@@ -51,11 +52,13 @@ class State {
 
   uint64_t ceiling_msg_size() { return ceiling_msg_size_.load(); }
   uint32_t reference_counts() { return reference_count_.load(); }
+  uint64_t write_busy_count() { return write_busy_count_.load(); }
 
  private:
   std::atomic<bool> need_remap_ = {false};
   std::atomic<uint32_t> seq_ = {0};
   std::atomic<uint32_t> reference_count_ = {0};
+  std::atomic<uint64_t> write_busy_count_ = {0};
   std::atomic<uint64_t> ceiling_msg_size_;
 };
 

@@ -22,11 +22,3 @@ py_proto_library(
     name = "examples_py_pb2",
     deps = [":examples_proto"],
 )
-
-cc_library(
-    name = "examples_fbs",
-    hdrs = ["examples_generated.h"],
-    deps = [
-        "@flatbuffers//:flatbuffers",
-    ],
-)

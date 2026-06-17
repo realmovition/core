@@ -30,6 +30,11 @@ cc_library(
 )
 
 cc_library(
+    name = "pod_message",
+    hdrs = ["pod_message.h"],
+)
+
+cc_library(
     name = "message_info",
     srcs = ["message_info.cc"],
     hdrs = ["message_info.h"],
@@ -55,6 +60,16 @@ cc_test(
     srcs = ["message_test.cc"],
     deps = [
         "//cyber:cyber_core",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "pod_message_test",
+    size = "small",
+    srcs = ["pod_message_test.cc"],
+    deps = [
+        ":pod_message",
         "@com_google_googletest//:gtest_main",
     ],
 )

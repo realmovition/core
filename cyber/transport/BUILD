@@ -9,6 +9,7 @@ cc_library(
     deps = [
         "//cyber/service_discovery:role",
         "//cyber/task",
+        ":iceoryx_runtime",
         "//cyber/transport/dispatcher:intra_dispatcher",
         "//cyber/transport/dispatcher:rtps_dispatcher",
         "//cyber/transport/dispatcher:shm_dispatcher",
@@ -21,7 +22,28 @@ cc_library(
         "//cyber/transport/rtps:underlay_message",
         "//cyber/transport/rtps:underlay_message_type",
         "//cyber/transport/transmitter",
+        "//cyber/transport/shm:profile",
         "@fastdds",
+    ],
+)
+
+cc_library(
+    name = "iceoryx_runtime",
+    hdrs = ["iceoryx_runtime.h"],
+    deps = [
+        "//cyber/common:global_data",
+        "//cyber/common:util",
+        "//cyber/proto:role_attributes_cc_proto",
+        "@iceoryx//:iceoryx_posh",
+        "@iceoryx//iceoryx_posh:iceoryx_posh_roudi",
+    ],
+)
+
+cc_library(
+    name = "iceoryx_chunk",
+    hdrs = ["iceoryx_chunk.h"],
+    deps = [
+        "//cyber/message:message_traits",
     ],
 )
 

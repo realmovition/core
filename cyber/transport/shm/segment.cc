@@ -18,6 +18,7 @@
 
 #include "cyber/common/log.h"
 #include "cyber/common/util.h"
+#include "cyber/transport/shm/profile.h"
 #include "cyber/transport/shm/shm_conf.h"
 
 namespace apollo {
@@ -59,7 +60,14 @@ bool Segment::AcquireBlockToWrite(std::size_t msg_size,
     return false;
   }
 
-  uint32_t index = GetNextWritableBlockIndex();
+  uint32_t index = 0;
+  if (!GetNextWritableBlockIndex(&index)) {
+    state_->IncreaseWriteBusyCount();
+    TransportProfileRecorder::Instance()->RecordBusy(channel_id_);
+    AERROR << "failed to get writable block index for channel[" << channel_id_
+           << "], possible slow-consumer pressure.";
+    return false;
+  }
   writable_block->index = index;
   writable_block->block = &blocks_[index];
   writable_block->buf = block_buf_addrs_[index];
@@ -113,6 +121,10 @@ void Segment::ReleaseReadBlock(const ReadableBlock& readable_block) {
   blocks_[index].ReleaseReadLock();
 }
 
+uint64_t Segment::WriteBusyCount() const {
+  return state_ == nullptr ? 0 : state_->write_busy_count();
+}
+
 bool Segment::Destroy() {
   if (!init_) {
     return true;
@@ -150,15 +162,23 @@ bool Segment::Recreate(const uint64_t& msg_size) {
   return OpenOrCreate();
 }
 
-uint32_t Segment::GetNextWritableBlockIndex() {
+bool Segment::GetNextWritableBlockIndex(uint32_t* index) {
+  RETURN_VAL_IF_NULL(index, false);
   const auto block_num = conf_.block_num();
-  while (1) {
+  if (block_num == 0) {
+    return false;
+  }
+  // Bounded retry avoids producer deadlock when every block is continuously
+  // occupied by slow readers.
+  const uint64_t max_attempts = static_cast<uint64_t>(block_num) * 4;
+  for (uint64_t attempt = 0; attempt < max_attempts; ++attempt) {
     uint32_t try_idx = state_->FetchAddSeq(1) % block_num;
     if (blocks_[try_idx].TryLockForWrite()) {
-      return try_idx;
+      *index = try_idx;
+      return true;
     }
   }
-  return 0;
+  return false;
 }
 
 }  // namespace transport

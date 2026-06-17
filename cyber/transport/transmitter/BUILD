@@ -6,6 +6,7 @@ cc_library(
     name = "transmitter",
     deps = [
         ":hybrid_transmitter",
+        ":iceoryx_transmitter",
         ":intra_transmitter",
         ":rtps_transmitter",
         ":shm_transmitter",
@@ -25,6 +26,19 @@ cc_library(
     hdrs = ["intra_transmitter.h"],
     deps = [
         ":transmitter_interface",
+    ],
+)
+
+cc_library(
+    name = "iceoryx_transmitter",
+    hdrs = ["iceoryx_transmitter.h"],
+    deps = [
+        "//cyber/transport:iceoryx_chunk",
+        "//cyber/transport:iceoryx_runtime",
+        "//cyber/transport/shm:profile",
+        ":shm_transmitter",
+        ":transmitter_interface",
+        "@iceoryx//:iceoryx_posh",
     ],
 )
 

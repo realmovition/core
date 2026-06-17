@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 
 #include "cyber/common/log.h"
@@ -84,8 +85,13 @@ void RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
   auto listener_adapter = [listener](
                               const std::shared_ptr<std::string>& msg_str,
                               const MessageInfo& msg_info) {
-    auto msg = std::make_shared<MessageT>();
-    RETURN_IF(!message::ParseFromString(*msg_str, msg.get()));
+    std::shared_ptr<MessageT> msg;
+    if constexpr (std::is_base_of<google::protobuf::Message, MessageT>::value) {
+      RETURN_IF(!message::ParseFromStringWithArena(*msg_str, &msg));
+    } else {
+      msg = std::make_shared<MessageT>();
+      RETURN_IF(!message::ParseFromString(*msg_str, msg.get()));
+    }
     listener(msg, msg_info);
   };
 
@@ -100,8 +106,13 @@ void RtpsDispatcher::AddListener(const RoleAttributes& self_attr,
   auto listener_adapter = [listener](
                               const std::shared_ptr<std::string>& msg_str,
                               const MessageInfo& msg_info) {
-    auto msg = std::make_shared<MessageT>();
-    RETURN_IF(!message::ParseFromString(*msg_str, msg.get()));
+    std::shared_ptr<MessageT> msg;
+    if constexpr (std::is_base_of<google::protobuf::Message, MessageT>::value) {
+      RETURN_IF(!message::ParseFromStringWithArena(*msg_str, &msg));
+    } else {
+      msg = std::make_shared<MessageT>();
+      RETURN_IF(!message::ParseFromString(*msg_str, msg.get()));
+    }
     listener(msg, msg_info);
   };
 

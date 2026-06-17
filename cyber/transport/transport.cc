@@ -16,7 +16,10 @@
 
 #include "cyber/transport/transport.h"
 
+#include <cstdlib>
+
 #include "cyber/common/global_data.h"
+#include "cyber/transport/shm/profile.h"
 
 namespace apollo {
 namespace cyber {
@@ -42,6 +45,13 @@ void Transport::Shutdown() {
   shm_dispatcher_->Shutdown();
   rtps_dispatcher_->Shutdown();
   notifier_->Shutdown();
+
+  if (const char* profile_path = std::getenv("CYBER_TRANSPORT_PROFILE_PATH");
+      profile_path != nullptr && profile_path[0] != '\0') {
+    if (!TransportProfileRecorder::Instance()->DumpToml(profile_path)) {
+      AERROR << "failed to dump transport profile to " << profile_path;
+    }
+  }
 
   if (participant_ != nullptr) {
     participant_->Shutdown();

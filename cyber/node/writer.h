@@ -17,8 +17,10 @@
 #ifndef CYBER_NODE_WRITER_H_
 #define CYBER_NODE_WRITER_H_
 
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cyber/proto/topology_change.pb.h"
@@ -41,6 +43,7 @@ namespace cyber {
 template <typename MessageT>
 class Writer : public WriterBase {
  public:
+  using LoanedMessage = transport::LoanedMessage<MessageT>;
   using TransmitterPtr = std::shared_ptr<transport::Transmitter<MessageT>>;
   using ChangeConnection =
       typename service_discovery::Manager::ChangeConnection;
@@ -83,6 +86,8 @@ class Writer : public WriterBase {
    * @return false if write failed
    */
   virtual bool Write(const std::shared_ptr<MessageT>& msg_ptr);
+  virtual bool Loan(std::size_t size, LoanedMessage* loaned_msg);
+  virtual bool Publish(LoanedMessage&& loaned_msg);
 
   /**
    * @brief Is there any Reader that subscribes our Channel?
@@ -167,6 +172,18 @@ template <typename MessageT>
 bool Writer<MessageT>::Write(const std::shared_ptr<MessageT>& msg_ptr) {
   RETURN_VAL_IF(!WriterBase::IsInit(), false);
   return transmitter_->Transmit(msg_ptr);
+}
+
+template <typename MessageT>
+bool Writer<MessageT>::Loan(std::size_t size, LoanedMessage* loaned_msg) {
+  RETURN_VAL_IF(!WriterBase::IsInit(), false);
+  return transmitter_->Loan(size, loaned_msg);
+}
+
+template <typename MessageT>
+bool Writer<MessageT>::Publish(LoanedMessage&& loaned_msg) {
+  RETURN_VAL_IF(!WriterBase::IsInit(), false);
+  return transmitter_->Publish(std::move(loaned_msg));
 }
 
 template <typename MessageT>

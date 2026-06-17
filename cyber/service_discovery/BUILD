@@ -140,6 +140,7 @@ cc_library(
         ":manager",
         ":multi_value_warehouse",
         ":single_value_warehouse",
+        "//cyber/transport/message:pod_message",
     ],
 )
 

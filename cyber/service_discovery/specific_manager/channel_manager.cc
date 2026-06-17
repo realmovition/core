@@ -25,6 +25,7 @@
 #include "cyber/message/message_traits.h"
 #include "cyber/message/py_message.h"
 #include "cyber/message/raw_message.h"
+#include "cyber/transport/message/pod_message.h"
 #include "cyber/state.h"
 #include "cyber/time/time.h"
 
@@ -39,6 +40,7 @@ ChannelManager::ChannelManager() {
   channel_name_ = "channel_change_broadcast";
   exempted_msg_types_.emplace(message::MessageType<message::RawMessage>());
   exempted_msg_types_.emplace(message::MessageType<message::PyMessageWrap>());
+  exempted_msg_types_.emplace(message::MessageType<transport::PodMessage>());
 }
 
 ChannelManager::~ChannelManager() {}

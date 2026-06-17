@@ -17,6 +17,7 @@
 #include "cyber/tools/cyber_recorder/recorder.h"
 
 #include "cyber/record/header_builder.h"
+#include "cyber/transport/message/pod_message.h"
 
 namespace apollo {
 namespace cyber {
@@ -86,16 +87,21 @@ bool Recorder::Stop() {
     return false;
   }
   is_stopping_ = true;
-  if (!FreeReadersImpl()) {
-    AERROR << " _free_readers error.";
-    return false;
-  }
-  writer_->Close();
-  node_.reset();
   if (display_thread_ && display_thread_->joinable()) {
     display_thread_->join();
     display_thread_ = nullptr;
   }
+  if (!FreeReadersImpl()) {
+    AERROR << " _free_readers error.";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(recorder_mutex_);
+    channel_reader_map_.clear();
+    pending_channels_.clear();
+    writer_->Close();
+  }
+  node_.reset();
   is_started_ = false;
   is_stopping_ = false;
   return true;
@@ -120,7 +126,13 @@ void Recorder::FindNewChannel(const RoleAttributes& role_attr) {
     AWARN << "Change message not has a message type or has an empty one.";
     return;
   }
-  if (!role_attr.has_proto_desc() || role_attr.proto_desc().empty()) {
+  std::string proto_desc =
+      role_attr.has_proto_desc() ? role_attr.proto_desc() : "";
+  if (proto_desc.empty() &&
+      role_attr.message_type() == transport::PodMessage::TypeName()) {
+    proto_desc = transport::PodSchemaDescriptor();
+  }
+  if (proto_desc.empty()) {
     AWARN << "Change message not has a proto desc or has an empty one.";
     return;
   }
@@ -139,14 +151,37 @@ void Recorder::FindNewChannel(const RoleAttributes& role_attr) {
     return;
   }
 
-  if (channel_reader_map_.find(role_attr.channel_name()) ==
-      channel_reader_map_.end()) {
+  {
+    std::lock_guard<std::mutex> lock(recorder_mutex_);
+    if (channel_reader_map_.find(role_attr.channel_name()) !=
+            channel_reader_map_.end() ||
+        pending_channels_.count(role_attr.channel_name()) > 0) {
+      return;
+    }
+    pending_channels_.insert(role_attr.channel_name());
+    AINFO << "recording channel: " << role_attr.channel_name()
+          << ", message_type: " << role_attr.message_type();
     if (!writer_->WriteChannel(role_attr.channel_name(),
                                role_attr.message_type(),
-                               role_attr.proto_desc())) {
+                               proto_desc)) {
       AERROR << "write channel fail, channel:" << role_attr.channel_name();
+      pending_channels_.erase(role_attr.channel_name());
+      return;
     }
-    InitReaderImpl(role_attr.channel_name(), role_attr.message_type());
+  }
+  if (!InitReaderImpl(role_attr.channel_name(), role_attr.message_type())) {
+    std::lock_guard<std::mutex> lock(recorder_mutex_);
+    pending_channels_.erase(role_attr.channel_name());
+  }
+}
+
+void Recorder::ScanExistingWriters() {
+  std::shared_ptr<ChannelManager> channel_manager =
+      TopologyManager::Instance()->channel_manager();
+  std::vector<proto::RoleAttributes> role_attr_vec;
+  channel_manager->GetWriters(&role_attr_vec);
+  for (auto role_attr : role_attr_vec) {
+    FindNewChannel(role_attr);
   }
 }
 
@@ -154,20 +189,16 @@ bool Recorder::InitReadersImpl() {
   std::shared_ptr<ChannelManager> channel_manager =
       TopologyManager::Instance()->channel_manager();
 
-  // get historical writers
-  std::vector<proto::RoleAttributes> role_attr_vec;
-  channel_manager->GetWriters(&role_attr_vec);
-  for (auto role_attr : role_attr_vec) {
-    FindNewChannel(role_attr);
-  }
-
-  // listen new writers in future
+  // Listen first, then scan historical writers to avoid missing writers that
+  // join between the snapshot and listener registration.
   change_conn_ = channel_manager->AddChangeListener(
       std::bind(&Recorder::TopologyCallback, this, std::placeholders::_1));
   if (!change_conn_.IsConnected()) {
     AERROR << "change connection is not connected";
     return false;
   }
+
+  ScanExistingWriters();
   return true;
 }
 
@@ -185,24 +216,40 @@ bool Recorder::InitReaderImpl(const std::string& channel_name,
   try {
     std::weak_ptr<Recorder> weak_this = shared_from_this();
     std::shared_ptr<ReaderBase> reader = nullptr;
-    auto callback = [weak_this, channel_name](
-                        const std::shared_ptr<RawMessage>& raw_message) {
-      auto share_this = weak_this.lock();
-      if (!share_this) {
-        return;
-      }
-      share_this->ReaderCallback(raw_message, channel_name);
-    };
     ReaderConfig config;
     config.channel_name = channel_name;
     config.pending_queue_size =
         gflags::Int32FromEnv("CYBER_PENDING_QUEUE_SIZE", 50);
-    reader = node_->CreateReader<RawMessage>(config, callback);
+    if (message_type == transport::PodMessage::TypeName()) {
+      auto callback = [weak_this, channel_name](
+                          const std::shared_ptr<transport::PodMessage>& pod) {
+        auto share_this = weak_this.lock();
+        if (!share_this) {
+          return;
+        }
+        share_this->PodReaderCallback(pod, channel_name);
+      };
+      reader = node_->CreateReader<transport::PodMessage>(config, callback);
+    } else {
+      auto callback = [weak_this, channel_name](
+                          const std::shared_ptr<RawMessage>& raw_message) {
+        auto share_this = weak_this.lock();
+        if (!share_this) {
+          return;
+        }
+        share_this->ReaderCallback(raw_message, channel_name);
+      };
+      reader = node_->CreateReader<RawMessage>(config, callback);
+    }
     if (reader == nullptr) {
       AERROR << "Create reader failed.";
       return false;
     }
-    channel_reader_map_[channel_name] = reader;
+    {
+      std::lock_guard<std::mutex> lock(recorder_mutex_);
+      channel_reader_map_[channel_name] = reader;
+      pending_channels_.erase(channel_name);
+    }
     return true;
   } catch (const std::bad_weak_ptr& e) {
     AERROR << e.what();
@@ -222,21 +269,69 @@ void Recorder::ReaderCallback(const std::shared_ptr<RawMessage>& message,
     return;
   }
 
-  message_time_ = Time::Now().ToNanosecond();
-  if (!writer_->WriteMessage(channel_name, message, message_time_)) {
-    AERROR << "write data fail, channel: " << channel_name;
+  const uint64_t message_time = Time::Now().ToNanosecond();
+  {
+    std::lock_guard<std::mutex> lock(recorder_mutex_);
+    message_time_ = message_time;
+    if (!writer_->WriteMessage(channel_name, message, message_time_)) {
+      AERROR << "write data fail, channel: " << channel_name;
+      return;
+    }
+    message_count_++;
+  }
+}
+
+void Recorder::PodReaderCallback(
+    const std::shared_ptr<transport::PodMessage>& message,
+    const std::string& channel_name) {
+  if (!is_started_ || is_stopping_) {
+    AERROR << "record procedure is not started or stopping.";
     return;
   }
 
-  message_count_++;
+  if (message == nullptr) {
+    AERROR << "message is nullptr, channel: " << channel_name;
+    return;
+  }
+
+  const uint64_t message_time = Time::Now().ToNanosecond();
+  std::string content;
+  if (!message->SerializeToString(&content)) {
+    AERROR << "serialize pod data fail, channel: " << channel_name;
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(recorder_mutex_);
+    message_time_ = message_time;
+    if (!writer_->WriteMessage(channel_name, content, message_time_)) {
+      AERROR << "write pod data fail, channel: " << channel_name;
+      return;
+    }
+    message_count_++;
+  }
 }
 
 void Recorder::ShowProgress() {
+  int scan_countdown = 0;
   while (is_started_ && !is_stopping_) {
+    if (scan_countdown == 0) {
+      ScanExistingWriters();
+      scan_countdown = 10;
+    }
+    --scan_countdown;
+    uint64_t message_time = 0;
+    uint64_t message_count = 0;
+    std::size_t channel_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(recorder_mutex_);
+      message_time = message_time_;
+      message_count = message_count_;
+      channel_count = channel_reader_map_.size();
+    }
     std::cout << "\r[RUNNING]  Record Time: " << std::setprecision(3)
-              << message_time_ / 1000000000
-              << "    Progress: " << channel_reader_map_.size() << " channels, "
-              << message_count_ << " messages";
+              << message_time / 1000000000
+              << "    Progress: " << channel_count << " channels, "
+              << message_count << " messages";
     std::cout.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }

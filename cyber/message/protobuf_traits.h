@@ -20,7 +20,9 @@
 #include <cassert>
 #include <memory>
 #include <string>
+#include <type_traits>
 
+#include "google/protobuf/arena.h"
 #include "cyber/message/protobuf_factory.h"
 
 namespace apollo {
@@ -67,6 +69,34 @@ template <typename MessageT,
               int>::type = 0>
 bool RegisterMessage(const MessageT& message) {
   return ProtobufFactory::Instance()->RegisterMessage(message);
+}
+
+template <typename MessageT,
+          typename std::enable_if<
+              std::is_base_of<google::protobuf::Message, MessageT>::value,
+              int>::type = 0>
+bool ParseFromArrayWithArena(const void* data, size_t size,
+                             std::shared_ptr<MessageT>* message) {
+  if (message == nullptr) {
+    return false;
+  }
+  auto arena = std::make_shared<google::protobuf::Arena>();
+  auto* raw = google::protobuf::Arena::Create<MessageT>(arena.get());
+  if (!raw->ParseFromArray(data, static_cast<int>(size))) {
+    return false;
+  }
+  *message = std::shared_ptr<MessageT>(
+      raw, [arena](MessageT*) mutable { arena.reset(); });
+  return true;
+}
+
+template <typename MessageT,
+          typename std::enable_if<
+              std::is_base_of<google::protobuf::Message, MessageT>::value,
+              int>::type = 0>
+bool ParseFromStringWithArena(const std::string& str,
+                              std::shared_ptr<MessageT>* message) {
+  return ParseFromArrayWithArena<MessageT>(str.data(), str.size(), message);
 }
 
 }  // namespace message

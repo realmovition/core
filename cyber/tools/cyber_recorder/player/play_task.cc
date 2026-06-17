@@ -16,6 +16,8 @@
 
 #include "cyber/tools/cyber_recorder/player/play_task.h"
 
+#include <utility>
+
 #include "cyber/common/log.h"
 
 namespace apollo {
@@ -24,20 +26,19 @@ namespace record {
 
 std::atomic<uint64_t> PlayTask::played_msg_num_ = {0};
 
-PlayTask::PlayTask(const MessagePtr& msg, const WriterPtr& writer,
-                   uint64_t msg_real_time_ns, uint64_t msg_play_time_ns)
-    : msg_(msg),
-      writer_(writer),
+PlayTask::PlayTask(PlayFn play_fn, uint64_t msg_real_time_ns,
+                   uint64_t msg_play_time_ns)
+    : play_fn_(std::move(play_fn)),
       msg_real_time_ns_(msg_real_time_ns),
       msg_play_time_ns_(msg_play_time_ns) {}
 
 void PlayTask::Play() {
-  if (writer_ == nullptr) {
-    AERROR << "writer is nullptr, can't write message.";
+  if (!play_fn_) {
+    AERROR << "play function is empty, can't write message.";
     return;
   }
 
-  if (!writer_->Write(msg_)) {
+  if (!play_fn_()) {
     AERROR << "write message failed, played num: " << played_msg_num_.load()
            << ", real time: " << msg_real_time_ns_
            << ", play time: " << msg_play_time_ns_;

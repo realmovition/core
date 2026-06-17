@@ -19,10 +19,7 @@
 
 #include <atomic>
 #include <cstdint>
-#include <memory>
-
-#include "cyber/message/raw_message.h"
-#include "cyber/node/writer.h"
+#include <functional>
 
 namespace apollo {
 namespace cyber {
@@ -30,11 +27,10 @@ namespace record {
 
 class PlayTask {
  public:
-  using MessagePtr = std::shared_ptr<message::RawMessage>;
-  using WriterPtr = std::shared_ptr<Writer<message::RawMessage>>;
+  using PlayFn = std::function<bool()>;
 
-  PlayTask(const MessagePtr& msg, const WriterPtr& writer,
-           uint64_t msg_real_time_ns, uint64_t msg_play_time_ns);
+  PlayTask(PlayFn play_fn, uint64_t msg_real_time_ns,
+           uint64_t msg_play_time_ns);
   virtual ~PlayTask() {}
 
   void Play();
@@ -44,8 +40,7 @@ class PlayTask {
   static uint64_t played_msg_num() { return played_msg_num_.load(); }
 
  private:
-  MessagePtr msg_;
-  WriterPtr writer_;
+  PlayFn play_fn_;
   uint64_t msg_real_time_ns_;
   uint64_t msg_play_time_ns_;
 

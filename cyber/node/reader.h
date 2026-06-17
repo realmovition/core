@@ -296,6 +296,7 @@ void Reader<MessageT>::Shutdown() {
     return;
   }
   LeaveTheTopology();
+  ReceiverManager<MessageT>::Instance()->RemoveReceiver(role_attr_);
   receiver_ = nullptr;
   channel_manager_ = nullptr;
 
