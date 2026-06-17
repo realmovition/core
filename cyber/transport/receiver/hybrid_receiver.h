@@ -32,6 +32,7 @@
 #include "cyber/service_discovery/role/role.h"
 #include "cyber/task/task.h"
 #include "cyber/time/time.h"
+#include "cyber/transport/receiver/iceoryx_receiver.h"
 #include "cyber/transport/receiver/intra_receiver.h"
 #include "cyber/transport/receiver/rtps_receiver.h"
 #include "cyber/transport/receiver/shm_receiver.h"
@@ -44,6 +45,33 @@ namespace transport {
 using apollo::cyber::proto::OptionalMode;
 using apollo::cyber::proto::QosDurabilityPolicy;
 using apollo::cyber::proto::RoleAttributes;
+
+namespace {
+
+inline void NormalizeHybridReceiverCommunicationMode(
+    proto::CommunicationMode* mode) {
+  if (mode == nullptr) {
+    return;
+  }
+  if (mode->same_proc() != OptionalMode::INTRA) {
+    AERROR << "invalid same_proc transport mode "
+           << static_cast<int>(mode->same_proc())
+           << ", forcing INTRA for same-process delivery";
+    mode->set_same_proc(OptionalMode::INTRA);
+  }
+  if (mode->diff_proc() == OptionalMode::INTRA) {
+    AERROR << "invalid diff_proc transport mode INTRA, forcing ICEORYX";
+    mode->set_diff_proc(OptionalMode::ICEORYX);
+  }
+  if (mode->diff_host() != OptionalMode::RTPS) {
+    AERROR << "invalid diff_host transport mode "
+           << static_cast<int>(mode->diff_host())
+           << ", forcing RTPS for cross-host delivery";
+    mode->set_diff_host(OptionalMode::RTPS);
+  }
+}
+
+}  // namespace
 
 template <typename M>
 class HybridReceiver : public Receiver<M> {
@@ -153,15 +181,20 @@ void HybridReceiver<M>::Disable(const RoleAttributes& opposite_attr) {
 
   uint64_t id = opposite_attr.id();
   std::lock_guard<std::mutex> lock(mutex_);
-  if (transmitters_[mapping_table_[relation]].count(id) > 0) {
-    transmitters_[mapping_table_[relation]].erase(id);
-    receivers_[mapping_table_[relation]]->Disable(opposite_attr);
+  const auto mode = mapping_table_[relation];
+  auto& mode_transmitters = transmitters_[mode];
+  if (mode_transmitters.count(id) > 0) {
+    mode_transmitters.erase(id);
+    if (mode_transmitters.empty()) {
+      receivers_[mode]->Disable(opposite_attr);
+    }
   }
 }
 
 template <typename M>
 void HybridReceiver<M>::InitMode() {
   mode_ = std::make_shared<proto::CommunicationMode>();
+  NormalizeHybridReceiverCommunicationMode(mode_.get());
   mapping_table_[SAME_PROC] = mode_->same_proc();
   mapping_table_[DIFF_PROC] = mode_->diff_proc();
   mapping_table_[DIFF_HOST] = mode_->diff_host();
@@ -177,6 +210,7 @@ void HybridReceiver<M>::ObtainConfig() {
     return;
   }
   mode_->CopyFrom(global_conf.transport_conf().communication_mode());
+  NormalizeHybridReceiverCommunicationMode(mode_.get());
 
   mapping_table_[SAME_PROC] = mode_->same_proc();
   mapping_table_[DIFF_PROC] = mode_->diff_proc();
@@ -211,6 +245,10 @@ void HybridReceiver<M>::InitReceivers() {
       case OptionalMode::SHM:
         receivers_[mode] =
             std::make_shared<ShmReceiver<M>>(this->attr_, listener);
+        break;
+      case OptionalMode::ICEORYX:
+        receivers_[mode] =
+            std::make_shared<IceoryxReceiver<M>>(this->attr_, listener);
         break;
       default:
         receivers_[mode] =

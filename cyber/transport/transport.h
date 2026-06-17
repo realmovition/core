@@ -29,6 +29,7 @@
 #include "cyber/transport/dispatcher/shm_dispatcher.h"
 #include "cyber/transport/qos/qos_profile_conf.h"
 #include "cyber/transport/receiver/hybrid_receiver.h"
+#include "cyber/transport/receiver/iceoryx_receiver.h"
 #include "cyber/transport/receiver/intra_receiver.h"
 #include "cyber/transport/receiver/receiver.h"
 #include "cyber/transport/receiver/rtps_receiver.h"
@@ -36,6 +37,7 @@
 #include "cyber/transport/rtps/participant.h"
 #include "cyber/transport/shm/notifier_factory.h"
 #include "cyber/transport/transmitter/hybrid_transmitter.h"
+#include "cyber/transport/transmitter/iceoryx_transmitter.h"
 #include "cyber/transport/transmitter/intra_transmitter.h"
 #include "cyber/transport/transmitter/rtps_transmitter.h"
 #include "cyber/transport/transmitter/shm_transmitter.h"
@@ -104,6 +106,10 @@ auto Transport::CreateTransmitter(const RoleAttributes& attr,
       transmitter = std::make_shared<ShmTransmitter<M>>(modified_attr);
       break;
 
+    case OptionalMode::ICEORYX:
+      transmitter = std::make_shared<IceoryxTransmitter<M>>(modified_attr);
+      break;
+
     case OptionalMode::RTPS:
       transmitter =
           std::make_shared<RtpsTransmitter<M>>(modified_attr, participant());
@@ -147,6 +153,11 @@ auto Transport::CreateReceiver(
 
     case OptionalMode::SHM:
       receiver = std::make_shared<ShmReceiver<M>>(modified_attr, msg_listener);
+      break;
+
+    case OptionalMode::ICEORYX:
+      receiver =
+          std::make_shared<IceoryxReceiver<M>>(modified_attr, msg_listener);
       break;
 
     case OptionalMode::RTPS:

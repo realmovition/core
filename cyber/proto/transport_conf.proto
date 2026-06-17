@@ -7,6 +7,12 @@ enum OptionalMode {
   INTRA = 1;
   SHM = 2;
   RTPS = 3;
+  ICEORYX = 4;
+}
+
+enum SlowConsumerPolicy {
+  DROP = 0;
+  OVERWRITE = 1;
 }
 
 message ShmMulticastLocator {
@@ -28,8 +34,8 @@ message RtpsParticipantAttr {
 };
 
 message CommunicationMode {
-  optional OptionalMode same_proc = 1 [default = INTRA];  // INTRA SHM RTPS
-  optional OptionalMode diff_proc = 2 [default = SHM];    // SHM RTPS
+  optional OptionalMode same_proc = 1 [default = INTRA];  // INTRA SHM ICEORYX RTPS
+  optional OptionalMode diff_proc = 2 [default = SHM];    // SHM ICEORYX RTPS
   optional OptionalMode diff_host = 3 [default = RTPS];   // RTPS
 };
 
@@ -42,4 +48,5 @@ message TransportConf {
   optional RtpsParticipantAttr participant_attr = 2;
   optional CommunicationMode communication_mode = 3;
   optional ResourceLimit resource_limit = 4;
-};
+  optional SlowConsumerPolicy slow_consumer_policy = 5 [default = DROP];
+}

@@ -6,6 +6,7 @@ cc_library(
     name = "receiver",
     deps = [
         ":hybrid_receiver",
+        ":iceoryx_receiver",
         ":intra_receiver",
         ":rtps_receiver",
         ":shm_receiver",
@@ -35,6 +36,23 @@ cc_library(
     hdrs = ["intra_receiver.h"],
     deps = [
         ":receiver_interface",
+    ],
+)
+
+cc_library(
+    name = "iceoryx_receiver",
+    hdrs = [
+        "iceoryx_event_bridge.h",
+        "iceoryx_receiver.h",
+    ],
+    deps = [
+        "//cyber/transport:iceoryx_chunk",
+        "//cyber/transport:iceoryx_runtime",
+        "//cyber/transport/shm:profile",
+        "//cyber/task",
+        "//cyber/transport/dispatcher:shm_dispatcher",
+        ":receiver_interface",
+        "@iceoryx//:iceoryx_posh",
     ],
 )
 

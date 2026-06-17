@@ -125,7 +125,11 @@ bool PlayTaskProducer::ReadRecordInfo() {
       }
 
       auto& proto_desc = record_reader->GetProtoDesc(channel_name);
-      pb_factory->RegisterMessage(proto_desc);
+      if (!proto_desc.empty() &&
+          msg_type != transport::PodMessage::TypeName() &&
+          !transport::IsPodSchemaDescriptor(proto_desc)) {
+        pb_factory->RegisterMessage(proto_desc);
+      }
     }
 
     auto& header = record_reader->GetHeader();
@@ -194,7 +198,6 @@ bool PlayTaskProducer::CreateWriters() {
     AERROR << "create node failed.";
     return false;
   }
-
   for (auto& item : msg_types_) {
     auto& channel_name = item.first;
     auto& msg_type = item.second;
@@ -208,16 +211,34 @@ bool PlayTaskProducer::CreateWriters() {
       proto::RoleAttributes attr;
       attr.set_channel_name(channel_name);
       attr.set_message_type(msg_type);
-      auto writer = node_->CreateWriter<message::RawMessage>(attr);
-      if (writer == nullptr) {
-        AERROR << "create writer failed. channel name: " << channel_name
-               << ", message type: " << msg_type;
-        return false;
+      if (msg_type == transport::PodMessage::TypeName()) {
+        auto writer = node_->CreateWriter<transport::PodMessage>(attr);
+        if (writer == nullptr) {
+          AERROR << "create pod writer failed. channel name: "
+                 << channel_name;
+          return false;
+        }
+        publishers_[channel_name] = [writer](const std::string& content) {
+          auto msg = std::make_shared<transport::PodMessage>();
+          if (!msg->ParseFromString(content)) {
+            return false;
+          }
+          return writer->Write(msg);
+        };
+      } else {
+        auto writer = node_->CreateWriter<message::RawMessage>(attr);
+        if (writer == nullptr) {
+          AERROR << "create writer failed. channel name: " << channel_name
+                 << ", message type: " << msg_type;
+          return false;
+        }
+        publishers_[channel_name] = [writer](const std::string& content) {
+          auto msg = std::make_shared<message::RawMessage>(content);
+          return writer->Write(msg);
+        };
       }
-      writers_[channel_name] = writer;
     }
   }
-
   return true;
 }
 
@@ -257,14 +278,16 @@ void PlayTaskProducer::ThreadFunc() {
           break;
         }
 
-        auto search = writers_.find(itr->channel_name);
-        if (search == writers_.end()) {
+        auto search = publishers_.find(itr->channel_name);
+        if (search == publishers_.end()) {
           continue;
         }
 
-        auto raw_msg = std::make_shared<message::RawMessage>(itr->content);
+        auto publish_fn = search->second;
+        auto content = itr->content;
         auto task = std::make_shared<PlayTask>(
-            raw_msg, search->second, itr->time, itr->time + plus_time_ns);
+            [publish_fn, content]() { return publish_fn(content); }, itr->time,
+            itr->time + plus_time_ns);
         task_buffer_->Push(task);
       }
     }

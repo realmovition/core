@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,7 @@
 #include "cyber/proto/record.pb.h"
 #include "cyber/proto/topology_change.pb.h"
 #include "cyber/record/record_writer.h"
+#include "cyber/transport/message/pod_message.h"
 
 using apollo::cyber::Node;
 using apollo::cyber::ReaderBase;
@@ -71,12 +73,16 @@ class Recorder : public std::enable_shared_from_this<Recorder> {
   proto::Header header_;
   std::unordered_map<std::string, std::shared_ptr<ReaderBase>>
       channel_reader_map_;
+  std::unordered_set<std::string> pending_channels_;
+  std::mutex recorder_mutex_;
   uint64_t message_count_;
   uint64_t message_time_;
 
   bool InitReadersImpl();
 
   bool FreeReadersImpl();
+
+  void ScanExistingWriters();
 
   bool InitReaderImpl(const std::string& channel_name,
                       const std::string& message_type);
@@ -85,6 +91,9 @@ class Recorder : public std::enable_shared_from_this<Recorder> {
 
   void ReaderCallback(const std::shared_ptr<RawMessage>& message,
                       const std::string& channel_name);
+  void PodReaderCallback(
+      const std::shared_ptr<transport::PodMessage>& message,
+      const std::string& channel_name);
 
   void FindNewChannel(const RoleAttributes& role_attr);
 

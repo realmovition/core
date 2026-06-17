@@ -232,6 +232,20 @@ TEST(MessageTraitsTest, parse_from_string) {
   EXPECT_EQ(str, raw.message);
 }
 
+TEST(MessageTraitsTest, parse_from_string_with_arena) {
+  proto::UnitTest ut;
+  ut.set_class_name("Arena");
+  ut.set_case_name("parse_from_string_with_arena");
+  std::string str;
+  ASSERT_TRUE(ut.SerializeToString(&str));
+
+  std::shared_ptr<proto::UnitTest> arena_msg;
+  ASSERT_TRUE(ParseFromStringWithArena(str, &arena_msg));
+  ASSERT_NE(arena_msg, nullptr);
+  EXPECT_EQ(arena_msg->class_name(), "Arena");
+  EXPECT_EQ(arena_msg->case_name(), "parse_from_string_with_arena");
+}
+
 TEST(MessageTraitsTest, serialize_parse_hc) {
   auto msg = std::make_shared<proto::Chatter>();
   msg->set_timestamp(12345);

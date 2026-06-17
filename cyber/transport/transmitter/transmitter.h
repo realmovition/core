@@ -17,9 +17,11 @@
 #ifndef CYBER_TRANSPORT_TRANSMITTER_TRANSMITTER_H_
 #define CYBER_TRANSPORT_TRANSMITTER_TRANSMITTER_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "cyber/event/perf_event_cache.h"
 #include "cyber/transport/common/endpoint.h"
@@ -31,6 +33,86 @@ namespace transport {
 
 using apollo::cyber::event::PerfEventCache;
 using apollo::cyber::event::TransPerf;
+
+template <typename M>
+class ShmTransmitter;
+template <typename M>
+class HybridTransmitter;
+
+class LoanAttachment {
+ public:
+  virtual ~LoanAttachment() = default;
+};
+
+template <typename M>
+class LoanedMessage {
+ public:
+  LoanedMessage() = default;
+  LoanedMessage(const LoanedMessage&) = delete;
+  LoanedMessage& operator=(const LoanedMessage&) = delete;
+  LoanedMessage(LoanedMessage&& other) noexcept
+      : attachment_(std::move(other.attachment_)),
+        data_(other.data_),
+        capacity_(other.capacity_),
+        size_(other.size_) {
+    other.Reset();
+  }
+  LoanedMessage& operator=(LoanedMessage&& other) noexcept {
+    if (this != &other) {
+      attachment_ = std::move(other.attachment_);
+      data_ = other.data_;
+      capacity_ = other.capacity_;
+      size_ = other.size_;
+      other.Reset();
+    }
+    return *this;
+  }
+
+  bool valid() const { return data_ != nullptr && capacity_ > 0; }
+  uint8_t* data() { return data_; }
+  const uint8_t* data() const { return data_; }
+  std::size_t capacity() const { return capacity_; }
+  std::size_t size() const { return size_; }
+  bool set_size(std::size_t size) {
+    if (size > capacity_) {
+      return false;
+    }
+    size_ = size;
+    return true;
+  }
+
+ private:
+  template <typename>
+  friend class Transmitter;
+  template <typename>
+  friend class ShmTransmitter;
+  template <typename>
+  friend class IceoryxTransmitter;
+  template <typename>
+  friend class HybridTransmitter;
+
+  void Reset() {
+    data_ = nullptr;
+    capacity_ = 0;
+    size_ = 0;
+    attachment_.reset();
+  }
+
+  void SetBuffer(uint8_t* data, std::size_t capacity) {
+    data_ = data;
+    capacity_ = capacity;
+    size_ = 0;
+  }
+
+  void SetAttachment(const std::shared_ptr<LoanAttachment>& attachment) {
+    attachment_ = attachment;
+  }
+
+  std::shared_ptr<LoanAttachment> attachment_;
+  uint8_t* data_ = nullptr;
+  std::size_t capacity_ = 0;
+  std::size_t size_ = 0;
+};
 
 template <typename M>
 class Transmitter : public Endpoint {
@@ -48,6 +130,16 @@ class Transmitter : public Endpoint {
 
   virtual bool Transmit(const MessagePtr& msg);
   virtual bool Transmit(const MessagePtr& msg, const MessageInfo& msg_info) = 0;
+  virtual bool IsLoanSupported() const { return false; }
+  virtual bool Loan(std::size_t size, LoanedMessage<M>* loaned_msg) {
+    (void)size;
+    (void)loaned_msg;
+    return false;
+  }
+  virtual bool Publish(LoanedMessage<M>&& loaned_msg) {
+    (void)loaned_msg;
+    return false;
+  }
 
   uint64_t NextSeqNum() { return ++seq_num_; }
 

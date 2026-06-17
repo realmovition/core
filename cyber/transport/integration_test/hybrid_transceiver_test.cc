@@ -338,6 +338,156 @@ TEST_F(HybridTransceiverTest, enable_and_disable_with_param_diff_host) {
   EXPECT_EQ(msgs.size(), 0);
 }
 
+TEST_F(HybridTransceiverTest,
+       enable_and_disable_with_param_same_proc_and_diff_host) {
+  RoleAttributes same_proc_attr;
+  same_proc_attr.set_host_name(common::GlobalData::Instance()->HostName());
+  same_proc_attr.set_process_id(common::GlobalData::Instance()->ProcessId());
+  same_proc_attr.mutable_qos_profile()->CopyFrom(
+      QosProfileConf::QOS_PROFILE_DEFAULT);
+  same_proc_attr.set_channel_name(channel_name_);
+  same_proc_attr.set_channel_id(common::Hash(channel_name_));
+
+  RoleAttributes diff_host_attr;
+  diff_host_attr.set_host_name("sorac");
+  diff_host_attr.set_process_id(12345);
+  diff_host_attr.mutable_qos_profile()->CopyFrom(
+      QosProfileConf::QOS_PROFILE_DEFAULT);
+  diff_host_attr.set_channel_name(channel_name_);
+  diff_host_attr.set_channel_id(common::Hash(channel_name_));
+
+  std::mutex mtx;
+  std::vector<proto::UnitTest> msgs;
+  ReceiverPtr same_proc_receiver =
+      std::make_shared<HybridReceiver<proto::UnitTest>>(
+          same_proc_attr,
+          [&](const std::shared_ptr<proto::UnitTest>& msg,
+              const MessageInfo& msg_info, const RoleAttributes& attr) {
+            (void)msg_info;
+            (void)attr;
+            std::lock_guard<std::mutex> lock(mtx);
+            msgs.emplace_back(*msg);
+          },
+          Transport::Instance()->participant());
+
+  ReceiverPtr diff_host_receiver =
+      std::make_shared<HybridReceiver<proto::UnitTest>>(
+          diff_host_attr,
+          [&](const std::shared_ptr<proto::UnitTest>& msg,
+              const MessageInfo& msg_info, const RoleAttributes& attr) {
+            (void)msg_info;
+            (void)attr;
+            std::lock_guard<std::mutex> lock(mtx);
+            msgs.emplace_back(*msg);
+          },
+          Transport::Instance()->participant());
+
+  std::string class_name(
+      "enable_and_disable_with_param_same_proc_and_diff_host");
+  auto msg = std::make_shared<proto::UnitTest>();
+  msg->set_class_name(class_name);
+  msg->set_case_name(class_name);
+
+  transmitter_a_->Enable(same_proc_receiver->attributes());
+  transmitter_a_->Enable(diff_host_receiver->attributes());
+  same_proc_receiver->Enable(transmitter_a_->attributes());
+  diff_host_receiver->Enable(transmitter_a_->attributes());
+
+  transmitter_a_->Transmit(msg);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(msgs.size(), 2);
+  for (auto& item : msgs) {
+    EXPECT_EQ(item.class_name(), class_name);
+    EXPECT_EQ(item.case_name(), class_name);
+  }
+
+  msgs.clear();
+  transmitter_a_->Disable(same_proc_receiver->attributes());
+  transmitter_a_->Disable(diff_host_receiver->attributes());
+  same_proc_receiver->Disable(transmitter_a_->attributes());
+  diff_host_receiver->Disable(transmitter_a_->attributes());
+
+  transmitter_a_->Transmit(msg);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(msgs.size(), 0);
+}
+
+TEST_F(HybridTransceiverTest,
+       enable_and_disable_with_param_same_host_diff_proc_and_diff_host) {
+  RoleAttributes same_host_attr;
+  same_host_attr.set_host_name(common::GlobalData::Instance()->HostName());
+  same_host_attr.set_host_ip(common::GlobalData::Instance()->HostIp());
+  same_host_attr.set_process_id(common::GlobalData::Instance()->ProcessId());
+  same_host_attr.mutable_qos_profile()->CopyFrom(
+      QosProfileConf::QOS_PROFILE_DEFAULT);
+  same_host_attr.set_channel_name(channel_name_);
+  same_host_attr.set_channel_id(common::Hash(channel_name_));
+
+  RoleAttributes diff_host_attr;
+  diff_host_attr.set_host_name("remote_host");
+  diff_host_attr.set_host_ip("10.255.255.1");
+  diff_host_attr.set_process_id(12345);
+  diff_host_attr.mutable_qos_profile()->CopyFrom(
+      QosProfileConf::QOS_PROFILE_DEFAULT);
+  diff_host_attr.set_channel_name(channel_name_);
+  diff_host_attr.set_channel_id(common::Hash(channel_name_));
+
+  std::mutex mtx;
+  std::vector<proto::UnitTest> msgs;
+  ReceiverPtr same_host_receiver =
+      std::make_shared<HybridReceiver<proto::UnitTest>>(
+          same_host_attr,
+          [&](const std::shared_ptr<proto::UnitTest>& msg,
+              const MessageInfo& msg_info, const RoleAttributes& attr) {
+            (void)msg_info;
+            (void)attr;
+            std::lock_guard<std::mutex> lock(mtx);
+            msgs.emplace_back(*msg);
+          },
+          Transport::Instance()->participant());
+
+  ReceiverPtr diff_host_receiver =
+      std::make_shared<HybridReceiver<proto::UnitTest>>(
+          diff_host_attr,
+          [&](const std::shared_ptr<proto::UnitTest>& msg,
+              const MessageInfo& msg_info, const RoleAttributes& attr) {
+            (void)msg_info;
+            (void)attr;
+            std::lock_guard<std::mutex> lock(mtx);
+            msgs.emplace_back(*msg);
+          },
+          Transport::Instance()->participant());
+
+  std::string class_name(
+      "enable_and_disable_with_param_same_host_diff_proc_and_diff_host");
+  auto msg = std::make_shared<proto::UnitTest>();
+  msg->set_class_name(class_name);
+  msg->set_case_name(class_name);
+
+  transmitter_b_->Enable(same_host_receiver->attributes());
+  transmitter_b_->Enable(diff_host_receiver->attributes());
+  same_host_receiver->Enable(transmitter_b_->attributes());
+  diff_host_receiver->Enable(transmitter_b_->attributes());
+
+  transmitter_b_->Transmit(msg);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(msgs.size(), 2);
+  for (auto& item : msgs) {
+    EXPECT_EQ(item.class_name(), class_name);
+    EXPECT_EQ(item.case_name(), class_name);
+  }
+
+  msgs.clear();
+  transmitter_b_->Disable(same_host_receiver->attributes());
+  transmitter_b_->Disable(diff_host_receiver->attributes());
+  same_host_receiver->Disable(transmitter_b_->attributes());
+  diff_host_receiver->Disable(transmitter_b_->attributes());
+
+  transmitter_b_->Transmit(msg);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(msgs.size(), 0);
+}
+
 }  // namespace transport
 }  // namespace cyber
 }  // namespace apollo

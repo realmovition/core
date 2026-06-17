@@ -46,25 +46,3 @@ cc_binary(
         "//cyber/proto:record_cc_proto",
     ],
 )
-
-cc_binary(
-    name = "talker_fb",
-    srcs = ["talker_fb.cc"],
-    deps = [
-        "//cyber",
-        "//cyber/examples/proto:examples_fbs",
-        "//cyber/message:flatbuffers_message",
-        "//cyber/proto:role_attributes_cc_proto",
-    ],
-)
-
-cc_binary(
-    name = "listener_fb",
-    srcs = ["listener_fb.cc"],
-    deps = [
-        "//cyber",
-        "//cyber/examples/proto:examples_fbs",
-        "//cyber/message:flatbuffers_message",
-        "//cyber/proto:role_attributes_cc_proto",
-    ],
-)

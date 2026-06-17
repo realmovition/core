@@ -37,5 +37,6 @@ test_suite(
     tests = [
         ":examples_integration_test",
         ":examples_stress_test",
+        "//cyber/examples/record_play:record_play_test",
     ],
 )

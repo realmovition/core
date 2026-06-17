@@ -37,6 +37,7 @@ struct WritableBlock {
   uint32_t index = 0;
   Block* block = nullptr;
   uint8_t* buf = nullptr;
+  std::shared_ptr<void> release_guard;
 };
 using ReadableBlock = WritableBlock;
 
@@ -50,6 +51,7 @@ class Segment {
 
   bool AcquireBlockToRead(ReadableBlock* readable_block);
   void ReleaseReadBlock(const ReadableBlock& readable_block);
+  uint64_t WriteBusyCount() const;
 
  protected:
   virtual bool Destroy();
@@ -71,7 +73,7 @@ class Segment {
  private:
   bool Remap();
   bool Recreate(const uint64_t& msg_size);
-  uint32_t GetNextWritableBlockIndex();
+  bool GetNextWritableBlockIndex(uint32_t* index);
 };
 
 }  // namespace transport

@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -38,7 +38,23 @@ cc_library(
         "//cyber",
         "//cyber/common:log",
         "//cyber/proto:record_cc_proto",
+        "//cyber/transport/message:pod_message",
         "@fastdds",
+    ],
+)
+
+cc_test(
+    name = "recorder_test",
+    size = "small",
+    srcs = ["recorder_test.cc"],
+    deps = [
+        ":recorder",
+        "//cyber",
+        "//cyber:init",
+        "//cyber/record:header_builder",
+        "//cyber/record:record_reader",
+        "//cyber/transport/message:pod_message",
+        "@com_google_googletest//:gtest",
     ],
 )
 

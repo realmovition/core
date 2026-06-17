@@ -16,6 +16,7 @@
 
 #include "cyber/transport/dispatcher/shm_dispatcher.h"
 
+#include <cstring>
 #include <memory>
 #include "gtest/gtest.h"
 
@@ -26,7 +27,10 @@
 #include "cyber/message/raw_message.h"
 #include "cyber/proto/unit_test.pb.h"
 #include "cyber/transport/common/identity.h"
+#include "cyber/transport/message/pod_message.h"
 #include "cyber/transport/transport.h"
+
+#include <vector>
 
 namespace apollo {
 namespace cyber {
@@ -93,6 +97,66 @@ TEST(ShmDispatcherTest, on_message) {
 
   sleep(1);
   EXPECT_EQ(recv_msg->message, send_msg->message);
+}
+
+TEST(ShmDispatcherTest, pod_message_zero_copy_read_from_shm) {
+  constexpr char kChannelName[] = "pod_message_zero_copy_read_from_shm";
+  constexpr char kMessageType[] = "apollo.cyber.transport.PodMessage";
+
+  auto dispatcher = ShmDispatcher::Instance();
+
+  RoleAttributes self_attr;
+  self_attr.set_channel_name(kChannelName);
+  self_attr.set_channel_id(common::Hash(kChannelName));
+  self_attr.set_message_type(kMessageType);
+  self_attr.set_host_name(common::GlobalData::Instance()->HostName());
+  self_attr.set_host_ip(common::GlobalData::Instance()->HostIp());
+  Identity self_id;
+  self_attr.set_id(self_id.HashValue());
+
+  std::shared_ptr<PodMessage> recv_msg;
+  dispatcher->AddListener<PodMessage>(
+      self_attr,
+      [&recv_msg](const std::shared_ptr<PodMessage>& msg, const MessageInfo&) {
+        recv_msg = msg;
+      });
+
+  RoleAttributes oppo_attr;
+  oppo_attr.CopyFrom(self_attr);
+  oppo_attr.set_host_name(common::GlobalData::Instance()->HostName());
+  oppo_attr.set_host_ip(common::GlobalData::Instance()->HostIp());
+  Identity oppo_id;
+  oppo_attr.set_id(oppo_id.HashValue());
+
+  auto transmitter =
+      Transport::Instance()->CreateTransmitter<PodMessage>(
+          oppo_attr, proto::OptionalMode::SHM);
+  ASSERT_NE(transmitter, nullptr);
+
+  const std::vector<uint8_t> payload = {1, 2, 3, 4, 5, 0, 7, 8};
+  const auto header = MakeImagePodChunkHeader(
+      /*timestamp_ns=*/123, /*frame_id=*/99, /*width=*/2, /*height=*/4,
+      /*stride_bytes=*/8, /*pixel_format=*/24,
+      static_cast<uint32_t>(payload.size()));
+
+  LoanedMessage<PodMessage> loaned;
+  ASSERT_TRUE(transmitter->Loan(PodChunkTotalSize(payload.size()), &loaned));
+  std::size_t written = 0;
+  ASSERT_TRUE(BuildPodChunk(header, payload.data(), payload.size(),
+                            loaned.data(), loaned.capacity(), &written));
+  ASSERT_EQ(written, PodChunkTotalSize(payload.size()));
+  ASSERT_TRUE(loaned.set_size(PodChunkTotalSize(payload.size())));
+  ASSERT_TRUE(transmitter->Publish(std::move(loaned)));
+
+  sleep(1);
+  ASSERT_NE(recv_msg, nullptr);
+  ASSERT_NE(recv_msg->header(), nullptr);
+  EXPECT_EQ(recv_msg->header()->magic, PodChunkHeader::kMagic);
+  EXPECT_EQ(recv_msg->header()->frame_id, 99u);
+  EXPECT_EQ(recv_msg->header()->payload_size, payload.size());
+  PodChunkView view = recv_msg->View();
+  ASSERT_NE(view.payload, nullptr);
+  EXPECT_EQ(0, std::memcmp(view.payload, payload.data(), payload.size()));
 }
 
 TEST(ShmDispatcherTest, shutdown) {

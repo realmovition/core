@@ -167,7 +167,7 @@ class ReaderBase {
 template <typename MessageT>
 class ReceiverManager {
  public:
-  ~ReceiverManager() { receiver_map_.clear(); }
+  ~ReceiverManager() { Clear(); }
 
   /**
    * @brief Get the Receiver object
@@ -177,6 +177,9 @@ class ReceiverManager {
    */
   auto GetReceiver(const proto::RoleAttributes& role_attr) ->
       typename std::shared_ptr<transport::Receiver<MessageT>>;
+
+  void RemoveReceiver(const proto::RoleAttributes& role_attr);
+  void Clear();
 
  private:
   std::unordered_map<std::string,
@@ -222,6 +225,42 @@ auto ReceiverManager<MessageT>::GetReceiver(
             });
   }
   return receiver_map_[channel_name];
+}
+
+template <typename MessageT>
+void ReceiverManager<MessageT>::RemoveReceiver(
+    const proto::RoleAttributes& role_attr) {
+  std::shared_ptr<transport::Receiver<MessageT>> receiver = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(receiver_map_mutex_);
+    auto iter = receiver_map_.find(role_attr.channel_name());
+    if (iter == receiver_map_.end()) {
+      return;
+    }
+    if (iter->second.use_count() > 2) {
+      return;
+    }
+    receiver = iter->second;
+    receiver_map_.erase(iter);
+  }
+  receiver->Disable();
+}
+
+template <typename MessageT>
+void ReceiverManager<MessageT>::Clear() {
+  std::vector<std::shared_ptr<transport::Receiver<MessageT>>> receivers;
+  {
+    std::lock_guard<std::mutex> lock(receiver_map_mutex_);
+    for (const auto& item : receiver_map_) {
+      receivers.emplace_back(item.second);
+    }
+    receiver_map_.clear();
+  }
+  for (auto& receiver : receivers) {
+    if (receiver != nullptr) {
+      receiver->Disable();
+    }
+  }
 }
 
 }  // namespace cyber

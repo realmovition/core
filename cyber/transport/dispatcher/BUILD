@@ -81,6 +81,7 @@ cc_library(
         ":dispatcher",
         "//cyber/message:message_traits",
         "//cyber/proto:proto_desc_cc_proto",
+        "//cyber/transport/message:pod_message",
         "//cyber/scheduler:scheduler_factory",
         "//cyber/transport/shm:notifier_factory",
         "//cyber/transport/shm:readable_info",
@@ -94,6 +95,7 @@ cc_test(
     srcs = ["shm_dispatcher_test.cc"],
     deps = [
         "//cyber:cyber_core",
+        "//cyber/transport/message:pod_message",
         "//cyber/proto:unit_test_cc_proto",
         "@com_google_googletest//:gtest_main",
     ],
