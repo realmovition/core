@@ -33,7 +33,9 @@ void RtpsDispatcher::Shutdown() {
     std::lock_guard<std::mutex> lock(subs_mutex_);
     for (auto& item : subs_) {
       item.second.sub = nullptr;
+      item.second.sub_listener = nullptr;
     }
+    subs_.clear();
   }
 
   participant_ = nullptr;

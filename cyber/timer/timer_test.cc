@@ -18,7 +18,13 @@
 
 #include "cyber/timer/timer.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 #include "gtest/gtest.h"
@@ -77,6 +83,68 @@ TEST(TimerTest, start_stop) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     timer.Stop();
   }
+}
+
+TEST(TimerTest, concurrent_stop_and_restart) {
+  std::atomic<int> callback_count{0};
+  std::mutex callback_mutex;
+  std::condition_variable callback_entered_cv;
+  std::condition_variable release_callback_cv;
+  bool first_callback_entered = false;
+  bool release_first_callback = false;
+
+  Timer timer(100,
+              [&]() {
+                const int count = callback_count.fetch_add(1) + 1;
+                if (count != 1) {
+                  return;
+                }
+                std::unique_lock<std::mutex> lock(callback_mutex);
+                first_callback_entered = true;
+                callback_entered_cv.notify_one();
+                release_callback_cv.wait(
+                    lock, [&release_first_callback]() {
+                      return release_first_callback;
+                    });
+              },
+              false);
+  timer.Start();
+
+  {
+    std::unique_lock<std::mutex> lock(callback_mutex);
+    ASSERT_TRUE(callback_entered_cv.wait_for(
+        lock, std::chrono::seconds(5),
+        [&first_callback_entered]() { return first_callback_entered; }));
+  }
+
+  auto stop_future = std::async(std::launch::async, [&timer]() { timer.Stop(); });
+  EXPECT_EQ(stop_future.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+
+  auto restart_future =
+      std::async(std::launch::async, [&timer]() { timer.Start(); });
+  EXPECT_EQ(restart_future.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+
+  {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    release_first_callback = true;
+  }
+  release_callback_cv.notify_one();
+
+  EXPECT_EQ(stop_future.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+
+  const int restarted_count = callback_count.load(std::memory_order_acquire);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline &&
+         callback_count.load(std::memory_order_acquire) == restarted_count) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  timer.Stop();
+  EXPECT_GT(callback_count.load(std::memory_order_acquire), restarted_count);
 }
 
 TEST(TimerTest, sim_mode) {

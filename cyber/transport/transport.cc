@@ -19,6 +19,7 @@
 #include <cstdlib>
 
 #include "cyber/common/global_data.h"
+#include "cyber/transport/iceoryx_runtime.h"
 #include "cyber/transport/shm/profile.h"
 
 namespace apollo {
@@ -57,6 +58,7 @@ void Transport::Shutdown() {
     participant_->Shutdown();
     participant_ = nullptr;
   }
+  ShutdownIceoryxRouDiDaemon();
 }
 
 void Transport::CreateParticipant() {

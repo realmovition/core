@@ -5,13 +5,14 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 
 def run(*args: str) -> None:
     subprocess.run(args, check=True)
 
 
-def resolve_python_executable(python: str | None) -> str:
+def resolve_python_executable(python: Optional[str]) -> str:
     return python or sys.executable
 
 

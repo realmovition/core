@@ -28,6 +28,7 @@ cc_library(
     srcs = ["participant.cc"],
     hdrs = ["participant.h"],
     deps = [
+        "//cyber:state",
         ":underlay_message",
         ":underlay_message_type",
         "//cyber/common:global_data",

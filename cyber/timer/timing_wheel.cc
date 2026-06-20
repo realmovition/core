@@ -53,11 +53,16 @@ void TimingWheel::Tick() {
       if (task) {
         ADEBUG << "index: " << current_work_wheel_index_
                << " timer id: " << task->timer_id_;
-        auto* callback =
-            reinterpret_cast<std::function<void()>*>(&(task->callback));
-        cyber::Async([this, callback] {
+        auto callback = task->callback;
+        task->callback_in_flight.fetch_add(1, std::memory_order_relaxed);
+        cyber::Async([this, task, callback]() mutable {
           if (this->running_) {
-            (*callback)();
+            callback();
+          }
+          if (task->callback_in_flight.fetch_sub(1, std::memory_order_acq_rel) ==
+              1) {
+            std::lock_guard<std::mutex> lock(task->callback_cv_mutex);
+            task->callback_cv.notify_all();
           }
         });
       }

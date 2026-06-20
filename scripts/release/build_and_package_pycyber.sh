@@ -30,6 +30,48 @@ cd "$REPO_ROOT"
 
 PYTHON_BIN=${PYTHON:-python3}
 PYTHON_BIN="$("$PYTHON_BIN" -c 'import sys; print(sys.executable)')"
+VENV_DIR=packaging/pycyber/.venv
+TARGET_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)'; then
+  echo "Error: pycyber release requires Python >= 3.8, got $TARGET_PYTHON_VERSION from $PYTHON_BIN" >&2
+  exit 1
+fi
+if [ -z "${PYTHON:-}" ] && [ "$TARGET_PYTHON_VERSION" != "3.11" ]; then
+  BAZEL_EXECROOT="$(bazel info execution_root 2>/dev/null || true)"
+  for candidate in "$BAZEL_EXECROOT"/external/rules_python~~python~python_3_11_*/bin/python3; do
+    if [ -x "$candidate" ]; then
+      PYTHON_BIN="$candidate"
+      TARGET_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+      echo "Using Bazel-managed Python $TARGET_PYTHON_VERSION interpreter: $PYTHON_BIN"
+      break
+    fi
+  done
+fi
+if [ "$TARGET_PYTHON_VERSION" != "3.11" ]; then
+  echo "Error: pycyber packaging currently requires Python 3.11, got $TARGET_PYTHON_VERSION from $PYTHON_BIN" >&2
+  exit 1
+fi
+if [ -x "$VENV_DIR/bin/python" ]; then
+  if ! "$VENV_DIR/bin/python" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+    rm -rf "$VENV_DIR"
+  else
+    VENV_PYTHON_VERSION="$("$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if [ "$VENV_PYTHON_VERSION" != "$TARGET_PYTHON_VERSION" ]; then
+      rm -rf "$VENV_DIR"
+    fi
+  fi
+fi
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+  echo "Creating pycyber build virtual environment at $VENV_DIR"
+    rm -rf "$VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+if ! "$VENV_DIR/bin/python" -c 'import sys; print(sys.executable)' >/dev/null 2>&1; then
+    rm -rf "$VENV_DIR"
+    echo "Recreating pycyber build virtual environment at $VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+PYTHON_BIN="$REPO_ROOT/$VENV_DIR/bin/python"
 echo "Using Python interpreter: $PYTHON_BIN"
 
 echo "Fetching tags from origin..."
@@ -117,9 +159,16 @@ if [ ${#DIST_SDISTS[@]} -gt 0 ]; then
   cp "${DIST_SDISTS[@]}" "$WHEELHOUSE_DIR"/
 fi
 
+# Collect distributable artifacts only (exclude SHA256SUMS and other side files).
+DIST_UPLOADS=("$WHEELHOUSE_DIR"/*.whl "$WHEELHOUSE_DIR"/*.tar.gz)
+if [ ${#DIST_UPLOADS[@]} -eq 0 ]; then
+  echo "No distribution artifacts found in $WHEELHOUSE_DIR" >&2
+  exit 1
+fi
+
 # Run twine check
 echo "Running twine check on artifacts..."
-"$PYTHON_BIN" -m twine check "$WHEELHOUSE_DIR"/* || { echo "twine check failed" >&2; exit 1; }
+"$PYTHON_BIN" -m twine check "${DIST_UPLOADS[@]}" || { echo "twine check failed" >&2; exit 1; }
 
 # Run smoke validation using the provided validation script
 if [ "$SKIP_VALIDATE" = false ]; then
@@ -131,6 +180,10 @@ if [ "$SKIP_VALIDATE" = false ]; then
   VALIDATE_WHEEL="${WHEELS[0]}"
   echo "Validating wheel: $VALIDATE_WHEEL"
   "$PYTHON_BIN" scripts/release/validate_pycyber.py --python "$PYTHON_BIN" --wheel "$VALIDATE_WHEEL" || { echo "Validation failed" >&2; exit 1; }
+  echo "Running pycyber packaging example coverage..."
+  "$PYTHON_BIN" packaging/pycyber/verify_pycyber_examples.py --python "$PYTHON_BIN" --wheel "$VALIDATE_WHEEL" || { echo "Packaging example verification failed" >&2; exit 1; }
+  echo "Running pycyber example smoke tests via Bazel..."
+  bazel test --config=ci //cyber/python/cyber_py3/examples:examples_smoke_test --test_output=errors || { echo "Example smoke test failed" >&2; exit 1; }
 else
   echo "Skipping validation (--skip-validate)"
 fi
@@ -144,7 +197,7 @@ else
 fi
 
 echo "Build and validation finished successfully. Artifacts are in: $WHEELHOUSE_DIR"
-echo "To upload to PyPI: $PYTHON_BIN -m twine upload $WHEELHOUSE_DIR/*"
-echo "To upload to TestPyPI: $PYTHON_BIN -m twine upload --repository testpypi $WHEELHOUSE_DIR/*"
+echo "To upload to PyPI: $PYTHON_BIN -m twine upload $WHEELHOUSE_DIR/*.whl $WHEELHOUSE_DIR/*.tar.gz"
+echo "To upload to TestPyPI: $PYTHON_BIN -m twine upload --repository testpypi $WHEELHOUSE_DIR/*.whl $WHEELHOUSE_DIR/*.tar.gz"
 
 exit 0

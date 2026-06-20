@@ -78,9 +78,7 @@ inline uint64_t HashBytes(const uint8_t* data, std::size_t size) {
 
 struct RecordPlayItem {
   std::string channel_name;
-  transport::PodPayloadKind payload_kind = transport::PodPayloadKind::UNKNOWN;
-  uint64_t timestamp_ns = 0;
-  uint64_t sequence = 0;
+  transport::PodChunkHeader header;
   uint64_t payload_hash = 0;
   std::vector<uint8_t> payload;
 };
@@ -147,22 +145,27 @@ inline bool LoadRecordPlayItems(const std::string& record_path,
 
     RecordPlayItem item;
     item.channel_name = message.channel_name;
-    item.payload_kind = PayloadKindForChannel(message.channel_name);
-    item.sequence = items->size();
+    item.header.payload_kind = static_cast<uint32_t>(
+        PayloadKindForChannel(message.channel_name));
+    item.header.timestamp_ns = message.time;
+    item.header.frame_id = items->size();
     transport::PodChunkView pod_view;
+    bool preserve_header = false;
     if (transport::ParsePodChunk(message.content.data(), message.content.size(),
                                  &pod_view) &&
         pod_view.payload != nullptr) {
-      item.timestamp_ns = pod_view.header.timestamp_ns;
-      item.payload_kind =
-          static_cast<transport::PodPayloadKind>(pod_view.header.payload_kind);
+      item.header = pod_view.header;
       item.payload.assign(pod_view.payload,
                           pod_view.payload + pod_view.payload_size);
+      preserve_header = true;
     } else {
-      item.timestamp_ns = message.time;
       item.payload.assign(message.content.begin(), message.content.end());
     }
     item.payload_hash = HashBytes(item.payload.data(), item.payload.size());
+    item.header.payload_size = static_cast<uint32_t>(item.payload.size());
+    if (!preserve_header) {
+      item.header.schema_hash = static_cast<uint32_t>(item.payload_hash);
+    }
     items->push_back(std::move(item));
     ++count;
   }
@@ -198,22 +201,29 @@ inline RecordPlaySchedule ExpandRecordPlaySchedule(const RecordPlayItems& items,
   schedule.reserve(items.size() * repeat);
   for (std::size_t round = 0; round < repeat; ++round) {
     for (const auto& item : items) {
-      RecordPlayItem copy = item;
-      copy.sequence = schedule.size();
-      schedule.push_back(std::move(copy));
+      schedule.push_back(item);
     }
   }
   return schedule;
 }
 
 inline transport::PodChunkHeader MakeHeader(const RecordPlayItem& item) {
-  transport::PodChunkHeader header;
-  header.payload_kind = static_cast<uint32_t>(item.payload_kind);
-  header.timestamp_ns = item.timestamp_ns;
-  header.frame_id = item.sequence;
-  header.payload_size = static_cast<uint32_t>(item.payload.size());
-  header.schema_hash = static_cast<uint32_t>(item.payload_hash);
-  return header;
+  return item.header;
+}
+
+inline bool HeadersEqual(const transport::PodChunkHeader& lhs,
+                         const transport::PodChunkHeader& rhs) {
+  return lhs.magic == rhs.magic && lhs.version == rhs.version &&
+         lhs.header_size == rhs.header_size &&
+         lhs.payload_kind == rhs.payload_kind &&
+         lhs.timestamp_ns == rhs.timestamp_ns &&
+         lhs.frame_id == rhs.frame_id && lhs.width == rhs.width &&
+         lhs.height == rhs.height && lhs.stride_bytes == rhs.stride_bytes &&
+         lhs.pixel_format == rhs.pixel_format &&
+         lhs.payload_size == rhs.payload_size &&
+         lhs.schema_hash == rhs.schema_hash &&
+         std::equal(std::begin(lhs.reserved), std::end(lhs.reserved),
+                    std::begin(rhs.reserved));
 }
 
 inline bool BuildChunk(const RecordPlayItem& item, std::vector<uint8_t>* chunk) {
@@ -261,11 +271,7 @@ inline bool ValidateChunk(const transport::PodMessage& message,
   if (header == nullptr) {
     return false;
   }
-  if (header->payload_kind != static_cast<uint32_t>(item.payload_kind) ||
-      header->timestamp_ns != item.timestamp_ns ||
-      header->frame_id != item.sequence ||
-      header->payload_size != item.payload.size() ||
-      header->schema_hash != static_cast<uint32_t>(item.payload_hash)) {
+  if (!HeadersEqual(*header, item.header)) {
     return false;
   }
   const auto view = message.View();

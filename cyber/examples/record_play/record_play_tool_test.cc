@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -24,6 +25,7 @@
 #include "cyber/cyber.h"
 #include "cyber/examples/record_play/record_play_tool.h"
 #include "cyber/message/raw_message.h"
+#include "cyber/transport/message/pod_message.h"
 
 namespace apollo {
 namespace cyber {
@@ -32,8 +34,16 @@ namespace record_play {
 namespace {
 
 constexpr char kTestSource[] = "record_play_tool_test_source.record";
+constexpr char kTestPodSource[] = "record_play_tool_test_pod_source.record";
 constexpr char kTestConverted[] = "record_play_tool_test_converted.record";
 constexpr char kTestManifest[] = "record_play_tool_test.manifest";
+
+void CleanupArtifacts() {
+  (void)std::remove(kTestSource);
+  (void)std::remove(kTestPodSource);
+  (void)std::remove(kTestConverted);
+  (void)std::remove(kTestManifest);
+}
 
 void WriteSourceRecord() {
   record::RecordWriter writer;
@@ -53,9 +63,83 @@ void WriteSourceRecord() {
   writer.Close();
 }
 
+bool WritePodSourceRecord(RecordPlayItems* expected) {
+  if (expected == nullptr) {
+    return false;
+  }
+  expected->clear();
+
+  record::RecordWriter writer;
+  writer.SetSizeOfFileSegmentation(0);
+  writer.SetIntervalOfFileSegmentation(0);
+  if (!writer.Open(kTestPodSource)) {
+    return false;
+  }
+
+  struct ChannelSpec {
+    const char* channel;
+    transport::PodChunkHeader header;
+    std::string payload;
+  };
+
+  const std::vector<ChannelSpec> specs = {
+      {kImageFront6mm,
+       transport::MakeImagePodChunkHeader(1001, 11, 1920, 1080, 3840, 7, 6,
+                                          0x10203040u),
+       "front6"},
+      {kImageFront12mm,
+       transport::MakeImagePodChunkHeader(1002, 12, 1280, 720, 2560, 9, 7,
+                                          0x55667788u),
+       "front12"},
+      {kPointCloud64,
+       transport::PodChunkHeader{
+           transport::PodChunkHeader::kMagic,
+           transport::PodChunkHeader::kVersion,
+           sizeof(transport::PodChunkHeader),
+           static_cast<uint32_t>(transport::PodPayloadKind::POINT_CLOUD),
+           1003,
+           13,
+           64,
+           32,
+           2048,
+           3,
+           5,
+           0x99AABBCCu,
+           {1, 2, 3, 4}},
+       "cloud"},
+  };
+
+  for (const auto& spec : specs) {
+    if (!writer.WriteChannel(spec.channel, transport::PodMessage::TypeName(),
+                             transport::PodSchemaDescriptor())) {
+      writer.Close();
+      return false;
+    }
+    transport::PodMessage pod(spec.header, spec.payload.data(),
+                              spec.payload.size());
+    std::string encoded;
+    if (!pod.SerializeToString(&encoded) ||
+        !writer.WriteMessage(spec.channel, encoded, spec.header.timestamp_ns)) {
+      writer.Close();
+      return false;
+    }
+
+    RecordPlayItem item;
+    item.channel_name = spec.channel;
+    item.header = spec.header;
+    item.payload_hash = HashBytes(
+        reinterpret_cast<const uint8_t*>(spec.payload.data()), spec.payload.size());
+    item.payload.assign(spec.payload.begin(), spec.payload.end());
+    expected->push_back(std::move(item));
+  }
+  writer.Close();
+  return true;
+}
+
 }  // namespace
 
 TEST(RecordPlayToolTest, ConvertAndBorrowRoundTrip) {
+  CleanupArtifacts();
   WriteSourceRecord();
 
   ConvertedRecordResult result;
@@ -81,9 +165,41 @@ TEST(RecordPlayToolTest, ConvertAndBorrowRoundTrip) {
   ASSERT_TRUE(std::filesystem::exists(kTestManifest));
   ASSERT_TRUE(std::filesystem::exists(kTestConverted));
 
-  ASSERT_TRUE(std::remove(kTestSource) == 0);
-  ASSERT_TRUE(std::remove(kTestConverted) == 0);
-  ASSERT_TRUE(std::remove(kTestManifest) == 0);
+  CleanupArtifacts();
+}
+
+TEST(RecordPlayToolTest, ConvertExistingPodRecordPreservesHeaders) {
+  CleanupArtifacts();
+  RecordPlayItems expected_items;
+  ASSERT_TRUE(WritePodSourceRecord(&expected_items));
+
+  ConvertedRecordResult result;
+  ASSERT_TRUE(ConvertRecordToPod(kTestPodSource, kTestConverted, kTestManifest,
+                                 /*max_per_channel=*/8, &result));
+  EXPECT_EQ(result.channels, 3U);
+  EXPECT_EQ(result.messages, expected_items.size());
+
+  std::unordered_map<std::string, RecordPlayItem> expected_by_channel;
+  for (const auto& item : expected_items) {
+    expected_by_channel.emplace(item.channel_name, item);
+  }
+
+  record::RecordReader converted_reader(kTestConverted);
+  ASSERT_TRUE(converted_reader.IsValid());
+  record::RecordMessage message;
+  std::size_t seen = 0;
+  while (converted_reader.ReadMessage(&message)) {
+    const auto expected_it = expected_by_channel.find(message.channel_name);
+    ASSERT_NE(expected_it, expected_by_channel.end());
+    transport::PodMessage pod;
+    ASSERT_TRUE(pod.ParseFromString(message.content));
+    EXPECT_TRUE(ValidateChunk(pod, expected_it->second));
+    EXPECT_EQ(message.time, expected_it->second.header.timestamp_ns);
+    ++seen;
+  }
+  EXPECT_EQ(seen, expected_items.size());
+
+  CleanupArtifacts();
 }
 
 }  // namespace record_play

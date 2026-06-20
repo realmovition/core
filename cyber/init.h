@@ -25,6 +25,9 @@ namespace cyber {
 
 bool Init(const char* binary_name);
 void Clear();
+void ClearFromPython();
+void ClearForPythonExit();
+void EnablePythonExitHandling();
 
 }  // namespace cyber
 }  // namespace apollo

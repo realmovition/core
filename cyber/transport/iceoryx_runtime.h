@@ -114,7 +114,7 @@ inline void EnsureIceoryxRouDiDaemon() {
     return;
   }
 
-  if (IceoryxEnvFlagEnabled("CYBER_ICEORYX_ROUDI_TIE_TO_PARENT", false)) {
+  if (IceoryxEnvFlagEnabled("CYBER_ICEORYX_ROUDI_TIE_TO_PARENT", true)) {
     if (::prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
       AERROR << "failed to bind embedded iceoryx RouDi to parent lifetime";
     }

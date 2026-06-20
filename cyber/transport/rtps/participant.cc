@@ -19,6 +19,8 @@
 #include "cyber/common/global_data.h"
 #include "cyber/common/log.h"
 #include "cyber/proto/transport_conf.pb.h"
+#include "cyber/state.h"
+#include "fastrtps/rtps/resources/ResourceEvent.h"
 
 namespace apollo {
 namespace cyber {
@@ -34,6 +36,13 @@ Participant::Participant(const std::string& name, int send_port,
 
 Participant::~Participant() {}
 
+void Participant::StopEventThread() {
+  std::lock_guard<std::mutex> lk(mutex_);
+  if (fastrtps_participant_ != nullptr) {
+    fastrtps_participant_->get_resource_event().stop_thread();
+  }
+}
+
 void Participant::Shutdown() {
   if (shutdown_.exchange(true)) {
     return;
@@ -41,7 +50,10 @@ void Participant::Shutdown() {
 
   std::lock_guard<std::mutex> lk(mutex_);
   if (fastrtps_participant_ != nullptr) {
-    if (listener_ == nullptr) {
+    fastrtps_participant_->get_resource_event().stop_thread();
+    // Global Cyber shutdown is terminal in this process, so prefer a quiet
+    // participant stop over Fast RTPS endpoint removal races during teardown.
+    if (listener_ == nullptr && !apollo::cyber::IsShutdown()) {
       eprosima::fastrtps::Domain::removeParticipant(fastrtps_participant_);
     }
     fastrtps_participant_ = nullptr;

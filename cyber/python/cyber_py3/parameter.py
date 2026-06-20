@@ -18,164 +18,152 @@
 # -*- coding: utf-8 -*-
 """Module for init environment."""
 
-import importlib
-import os
 import sys
 
+from ._internal import _CYBER
 
-# init vars
-CYBER_PATH = os.environ.get('CYBER_PATH', '/apollo/cyber')
-CYBER_DIR = os.path.split(CYBER_PATH)[0]
-wrapper_lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                                '../internal'))
-sys.path.append(wrapper_lib_path)
 
-_CYBER_PARAM = importlib.import_module('_cyber_parameter_wrapper')
+def _is_finalizing():
+    return getattr(sys, "is_finalizing", lambda: False)()
+
+
+def _unwrap_parameter(param):
+    if isinstance(param, Parameter):
+        return param.param
+    return param
 
 
 class Parameter(object):
+    """Class for Parameter wrapper."""
 
-    """
-    Class for Parameter wrapper.
-    """
-
-    def __init__(self, name, value=None):
-        if (name is not None and value is None):
+    def __init__(self, name=None, value=None):
+        self.param = None
+        if isinstance(name, _CYBER.Parameter) and value is None:
             self.param = name
-        elif (name is None and value is None):
-            self.param = _CYBER_PARAM.new_PyParameter_noparam()
+        elif name is None and value is None:
+            self.param = _CYBER.Parameter()
+        elif value is None:
+            self.param = _CYBER.Parameter(name)
+        elif isinstance(value, bool):
+            self.param = _CYBER.Parameter(name, value)
         elif isinstance(value, int):
-            self.param = _CYBER_PARAM.new_PyParameter_int(name, value)
+            self.param = _CYBER.Parameter(name, int(value))
         elif isinstance(value, float):
-            self.param = _CYBER_PARAM.new_PyParameter_double(name, value)
+            self.param = _CYBER.Parameter(name, float(value))
         elif isinstance(value, str):
-            self.param = _CYBER_PARAM.new_PyParameter_string(name, value)
+            self.param = _CYBER.Parameter(name, value)
         else:
-            print("type is not supported: ", type(value))
+            raise TypeError("type is not supported: %s" % type(value))
 
-    def __del__(self):
-        _CYBER_PARAM.delete_PyParameter(self.param)
+    def close(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def type(self):
+        return self.param.type()
 
     def type_name(self):
-        """
-        return Parameter typename
-        """
-        return _CYBER_PARAM.PyParameter_type_name(self.param)
+        return self.param.type_name()
 
     def descriptor(self):
-        """
-        return Parameter descriptor
-        """
-        return _CYBER_PARAM.PyParameter_descriptor(self.param)
+        return self.param.descriptor()
 
     def name(self):
-        """
-        return Parameter name
-        """
-        return _CYBER_PARAM.PyParameter_name(self.param)
+        return self.param.name()
 
     def debug_string(self):
-        """
-        return Parameter debug string
-        """
-        return _CYBER_PARAM.PyParameter_debug_string(self.param)
+        return self.param.debug_string()
 
     def as_string(self):
-        """
-        return native value
-        """
-        return _CYBER_PARAM.PyParameter_as_string(self.param)
+        return self.param.as_string()
 
     def as_double(self):
-        """
-        return native value
-        """
-        return _CYBER_PARAM.PyParameter_as_double(self.param)
+        return self.param.as_double()
 
     def as_int64(self):
-        """
-        return native value
-        """
-        return _CYBER_PARAM.PyParameter_as_int64(self.param)
+        return self.param.as_int64()
+
+    def as_bool(self):
+        return self.param.as_bool()
 
 
 class ParameterClient(object):
+    """Class for ParameterClient wrapper."""
 
-    """
-    Class for ParameterClient wrapper.
-    """
-
-    ##
-    # @brief constructor the ParameterClient by a node and the parameter server node name.
-    #
-    # @param node a node to create client.
-    # @param server_node_name the parameter server's node name.
     def __init__(self, node, server_node_name):
-        self.param_clt = _CYBER_PARAM.new_PyParameterClient(
-            node.node, server_node_name)
+        self.param_clt = _CYBER.ParameterClient(node._node, server_node_name)
+        self._closed = False
+        self._owner = node
+        node._register_owned_resource(self)
 
     def __del__(self):
-        _CYBER_PARAM.delete_PyParameterClient(self.param_clt)
+        if _is_finalizing():
+            return
+        self.close()
+
+    def close(self):
+        if self._closed or self.param_clt is None:
+            return
+        self.param_clt.close()
+        self.param_clt = None
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     def set_parameter(self, param):
-        """
-        set parameter, param is Parameter.
-        """
-        return _CYBER_PARAM.PyParameter_clt_set_parameter(self.param_clt, param.param)
+        return self.param_clt.set_parameter(_unwrap_parameter(param))
 
     def get_parameter(self, param_name):
-        """
-        get Parameter by param name param_name.
-        """
-        return Parameter(_CYBER_PARAM.PyParameter_clt_get_parameter(self.param_clt, param_name))
+        return Parameter(self.param_clt.get_parameter(param_name))
 
     def get_paramslist(self):
-        """
-        get all params of the server_node_name parameterserver.
-        """
-        pycapsulelist = _CYBER_PARAM.PyParameter_clt_get_parameter_list(
-            self.param_clt)
-        param_list = []
-        for capsuleobj in pycapsulelist:
-            param_list.append(Parameter(capsuleobj))
-        return param_list
+        return [Parameter(param) for param in self.param_clt.get_parameter_list()]
 
 
 class ParameterServer(object):
+    """Class for ParameterServer wrapper."""
 
-    """
-    Class for ParameterServer wrapper.
-    """
-
-    ##
-    # @brief constructor the ParameterServer by the node object.
-    #
-    # @param node the node to support the parameter server.
     def __init__(self, node):
-        self.param_srv = _CYBER_PARAM.new_PyParameterServer(node.node)
+        self.param_srv = _CYBER.ParameterServer(node._node)
+        self._closed = False
+        self._owner = node
+        node._register_owned_resource(self)
 
     def __del__(self):
-        _CYBER_PARAM.delete_PyParameterServer(self.param_srv)
+        if _is_finalizing():
+            return
+        self.close()
+
+    def close(self):
+        if self._closed or self.param_srv is None:
+            return
+        self.param_srv.close()
+        self.param_srv = None
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     def set_parameter(self, param):
-        """
-        set parameter, param is Parameter.
-        """
-        return _CYBER_PARAM.PyParameter_srv_set_parameter(self.param_srv, param.param)
+        return self.param_srv.set_parameter(_unwrap_parameter(param))
 
     def get_parameter(self, param_name):
-        """
-        get Parameter by param name param_name.
-        """
-        return Parameter(_CYBER_PARAM.PyParameter_srv_get_parameter(self.param_srv, param_name))
+        return Parameter(self.param_srv.get_parameter(param_name))
 
     def get_paramslist(self):
-        """
-        get all params of this parameterserver.
-        """
-        pycapsulelist = _CYBER_PARAM.PyParameter_srv_get_parameter_list(
-            self.param_srv)
-        param_list = []
-        for capsuleobj in pycapsulelist:
-            param_list.append(Parameter(capsuleobj))
-        return param_list
+        return [Parameter(param) for param in self.param_srv.get_parameter_list()]

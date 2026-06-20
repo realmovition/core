@@ -67,7 +67,7 @@ inline bool WriteTextFile(const std::string& path, const std::string& content) {
 }
 
 inline std::string BuildManifestLine(const RecordPlayItem& item) {
-  return item.channel_name + "\t" + std::to_string(item.timestamp_ns) + "\t" +
+  return item.channel_name + "\t" + std::to_string(item.header.timestamp_ns) + "\t" +
          std::to_string(item.payload.size()) + "\t" +
          std::to_string(item.payload_hash) + "\n";
 }
@@ -117,7 +117,8 @@ inline bool ConvertRecordToPod(const std::string& source_record,
       writer.Close();
       return false;
     }
-    if (!writer.WriteMessage(item.channel_name, encoded, item.timestamp_ns)) {
+    if (!writer.WriteMessage(item.channel_name, encoded,
+                             item.header.timestamp_ns)) {
       writer.Close();
       return false;
     }
@@ -254,7 +255,7 @@ inline bool DumpConvertedRecord(const std::string& record,
     std::filesystem::create_directories(channel_dir);
     const auto index = per_channel_index[item.channel_name]++;
     const auto base = channel_dir + "/" + std::to_string(index) + "_" +
-                      std::to_string(item.timestamp_ns);
+                      std::to_string(item.header.timestamp_ns);
     const auto bin_path = base + ".bin";
     std::ofstream bin(bin_path, std::ios::binary | std::ios::trunc);
     if (!bin.is_open()) {
@@ -267,7 +268,7 @@ inline bool DumpConvertedRecord(const std::string& record,
     }
     const std::string meta = "channel=" + item.channel_name +
                              "\ntimestamp_ns=" +
-                             std::to_string(item.timestamp_ns) +
+                             std::to_string(item.header.timestamp_ns) +
                              "\npayload_size=" +
                              std::to_string(view.payload_size) +
                              "\npayload_hash=" +

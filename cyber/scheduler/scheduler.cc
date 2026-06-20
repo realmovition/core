@@ -131,6 +131,10 @@ void Scheduler::Shutdown() {
     ctx->Shutdown();
   }
 
+  for (auto& processor : processors_) {
+    processor->Stop();
+  }
+
   std::vector<uint64_t> cr_list;
   {
     ReadLockGuard<AtomicRWLock> lk(id_cr_lock_);
@@ -141,10 +145,6 @@ void Scheduler::Shutdown() {
 
   for (auto& id : cr_list) {
     RemoveCRoutine(id);
-  }
-
-  for (auto& processor : processors_) {
-    processor->Stop();
   }
 
   processors_.clear();

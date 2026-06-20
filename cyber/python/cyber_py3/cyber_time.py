@@ -18,163 +18,114 @@
 # -*- coding: utf-8 -*-
 """Module for init environment."""
 
-import importlib
-import os
-import sys
-
-
-# init vars
-wrapper_lib_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                                '../internal'))
-sys.path.append(wrapper_lib_path)
-
-_CYBER = importlib.import_module('_cyber_wrapper')
-_CYBER_TIME = importlib.import_module('_cyber_time_wrapper')
+from ._internal import _CYBER
 
 
 class Duration(object):
-
-    """
-    Class for cyber Duration wrapper.
-    """
+    """Class for cyber Duration wrapper."""
 
     def __init__(self, other):
-        if isinstance(other, int):
-            self.nanoseconds_ = other
+        if isinstance(other, Duration):
+            self._duration = _CYBER.Duration(other.to_nsec())
+        elif isinstance(other, int):
+            self._duration = _CYBER.Duration(other)
         elif isinstance(other, float):
-            self.nanoseconds_ = other * 1000000000
-        elif isinstance(other, Duration):
-            self.nanoseconds_ = other.nanoseconds_
-        self.duration_ = _CYBER_TIME.new_PyDuration(int(self.nanoseconds_))
-
-    def __del__(self):
-        _CYBER_TIME.delete_PyDuration(self.duration_)
+            self._duration = _CYBER.Duration(other)
+        else:
+            raise TypeError("Duration expects int, float, or Duration")
 
     def sleep(self):
-        """
-        sleep for the amount of time specified by the duration.
-        """
-        _CYBER_TIME.PyDuration_sleep(self.duration_)
+        self._duration.sleep()
 
     def __str__(self):
-        return str(self.nanoseconds_)
+        return str(self.to_nsec())
 
     def to_sec(self):
-        """
-        convert to second.
-        """
-        return float(self.nanoseconds_) / 1000000000
+        return self._duration.to_sec()
 
     def to_nsec(self):
-        """
-        convert to nanosecond.
-        """
-        return self.nanoseconds_
+        return self._duration.to_nsec()
 
     def iszero(self):
-        return self.nanoseconds_ == 0
+        return self._duration.iszero()
 
     def __add__(self, other):
-        return Duration(self.nanoseconds_ + other.nanoseconds_)
+        return Duration(self.to_nsec() + other.to_nsec())
 
     def __radd__(self, other):
-        return Duration(self.nanoseconds_ + other.nanoseconds_)
+        return Duration(self.to_nsec() + other.to_nsec())
 
     def __sub__(self, other):
-        return Duration(self.nanoseconds_ - other.nanoseconds_)
+        return Duration(self.to_nsec() - other.to_nsec())
 
     def __lt__(self, other):
-        return self.nanoseconds_ < other.nanoseconds_
+        return self.to_nsec() < other.to_nsec()
 
     def __gt__(self, other):
-        return self.nanoseconds_ > other.nanoseconds_
+        return self.to_nsec() > other.to_nsec()
 
     def __le__(self, other):
-        return self.nanoseconds_ <= other.nanoseconds_
+        return self.to_nsec() <= other.to_nsec()
 
     def __ge__(self, other):
-        return self.nanoseconds_ >= other.nanoseconds_
+        return self.to_nsec() >= other.to_nsec()
 
     def __eq__(self, other):
-        return self.nanoseconds_ == other.nanoseconds_
+        return self.to_nsec() == other.to_nsec()
 
     def __ne__(self, other):
-        return self.nanoseconds_ != other.nanoseconds_
+        return self.to_nsec() != other.to_nsec()
 
 
 class Time(object):
+    """Class for cyber time wrapper."""
 
-    """
-    Class for cyber time wrapper.
-    """
-
-    ##
-    # @brief Constructor, creates a Time.
-    #
-    # @param other float means seconds unit.
-    # int means nanoseconds.
     def __init__(self, other):
-        nanoseconds = 0
-        if isinstance(other, int):
-            nanoseconds = other
+        if isinstance(other, Time):
+            self.time = _CYBER.Time(other.to_nsec())
+        elif isinstance(other, int):
+            self.time = _CYBER.Time(other)
         elif isinstance(other, float):
-            nanoseconds = other * 1000000000
-        elif isinstance(other, Time):
-            nanoseconds = other.to_nsec()
+            self.time = _CYBER.Time(other)
+        else:
+            raise TypeError("Time expects int, float, or Time")
 
-        self.time = _CYBER_TIME.new_PyTime(int(nanoseconds))
-
-    def __del__(self):
-        _CYBER_TIME.delete_PyTime(self.time)
+    @classmethod
+    def _from_native(cls, native_time):
+        instance = cls.__new__(cls)
+        instance.time = native_time
+        return instance
 
     def __str__(self):
         return str(self.to_nsec())
 
     def iszero(self):
-        return self.to_nsec() == 0
+        return self.time.iszero()
 
     @staticmethod
     def now():
-        """
-        return current time.
-        """
-        # print _CYBER_TIME.PyTime_now()
-        # print type(_CYBER_TIME.PyTime_now())
-        time_now = Time(_CYBER_TIME.PyTime_now())
-        return time_now
+        return Time._from_native(_CYBER.Time.now())
 
     @staticmethod
     def mono_time():
-        mono_time = Time(_CYBER_TIME.PyTime_mono_time())
-        return mono_time
+        return Time._from_native(_CYBER.Time.mono_time())
 
     def to_sec(self):
-        """
-        convert to second.
-        """
-        return _CYBER_TIME.PyTime_to_sec(self.time)
+        return self.time.to_sec()
 
     def to_nsec(self):
-        """
-        convert to nanosecond.
-        """
-        return _CYBER_TIME.PyTime_to_nsec(self.time)
+        return self.time.to_nsec()
 
     def sleep_until(self, cyber_time):
-        """
-        sleep until time.
-        """
-        if isinstance(time, Time):
-            return _CYBER_TIME.PyTime_sleep_until(self.time,
-                                                  cyber_time.to_nsec())
+        if isinstance(cyber_time, Time):
+            self.time.sleep_until(cyber_time.to_nsec())
+            return None
         return NotImplemented
 
     def __sub__(self, other):
         if isinstance(other, Time):
             return Duration(self.to_nsec() - other.to_nsec())
-        else:
-            isinstance(other, Duration)
-            return Time(self.to_nsec() - other.to_nsec())
+        return Time(self.to_nsec() - other.to_nsec())
 
     def __add__(self, other):
         return Time(self.to_nsec() + other.to_nsec())
@@ -202,50 +153,32 @@ class Time(object):
 
 
 class Rate(object):
+    """Class for cyber Rate wrapper."""
 
-    """
-    Class for cyber Rate wrapper. Help run loops at a desired frequency.
-    """
-
-    ##
-    # @brief Constructor, creates a Rate.
-    #
-    # @param other float means frequency the desired rate to run at in Hz.
-    # int means the expected_cycle_time.
     def __init__(self, other):
         if isinstance(other, int):
-            self.rate_ = _CYBER_TIME.new_PyRate(other)
+            self._rate = _CYBER.Rate(other)
         elif isinstance(other, float):
-            self.rate_ = _CYBER_TIME.new_PyRate(int(1.0 / other))
+            self._rate = _CYBER.Rate(int(1.0 / other))
         elif isinstance(other, Duration):
-            self.rate_ = _CYBER_TIME.new_PyRate(other.to_nsec())
-
-    def __del__(self):
-        _CYBER_TIME.delete_PyRate(self.rate_)
+            self._rate = _CYBER.Rate(other.to_nsec())
+        else:
+            raise TypeError("Rate expects int, float, or Duration")
 
     def __str__(self):
-        return "cycle_time = %s, exp_cycle_time = %s" % (str(self.get_cycle_time()), str(self.get_expected_cycle_time()))
+        return "cycle_time = %s, exp_cycle_time = %s" % (
+            str(self.get_cycle_time()),
+            str(self.get_expected_cycle_time()),
+        )
 
     def sleep(self):
-        """
-        Sleeps for any leftover time in a cycle.
-        """
-        _CYBER_TIME.PyRate_sleep(self.rate_)
+        self._rate.sleep()
 
     def reset(self):
-        """
-        Sets the start time for the rate to now.
-        """
-        _CYBER_TIME.PyRate_PyRate_reset(self.rate_)
+        self._rate.reset()
 
     def get_cycle_time(self):
-        """
-        Get the actual run time of a cycle from start to sleep.
-        """
-        return Duration(_CYBER_TIME.PyRate_get_cycle_time(self.rate_))
+        return Duration(self._rate.get_cycle_time())
 
     def get_expected_cycle_time(self):
-        """
-        Get the expected cycle time.
-        """
-        return Duration(_CYBER_TIME.PyRate_get_expected_cycle_time(self.rate_))
+        return Duration(self._rate.get_expected_cycle_time())

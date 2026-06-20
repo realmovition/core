@@ -25,7 +25,9 @@ LOCKFILE_TARGETS=(
   //cyber
   //:wheelos_core
   //cyber/message/...
-  //cyber/python/internal:py_cyber_test
+  //cyber/python/internal:_cyber_wrapper.so
+  //cyber/python/cyber_py3/test:all
+  //cyber/python/cyber_py3/examples:examples_smoke_test
   //cyber/transport/rtps:rtps_test
   //cyber/transport/integration_test:rtps_transceiver_test
   //cyber/examples/integration_test:examples_regression_tests

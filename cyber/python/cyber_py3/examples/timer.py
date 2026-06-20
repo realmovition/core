@@ -18,6 +18,7 @@
 
 """Module for example of timer."""
 
+import sys
 import time
 
 from cyber.python.cyber_py3 import cyber
@@ -35,17 +36,19 @@ def fun():
 
 def test_timer():
     cyber.init()
-    ct = cyber_timer.Timer(10, fun, 0)  # 10ms
-    ct.start()
-    time.sleep(1)  # 1s
-    ct.stop()
+    with cyber_timer.Timer(10, fun, 0) as ct:  # 10ms
+        ct.start()
+        time.sleep(1)  # 1s
+        ct.stop()
+        time.sleep(0.5)
 
     print("+" * 80, "test set_option")
-    ct2 = cyber_timer.Timer()  # 10ms
-    ct2.set_option(10, fun, 0)
-    ct2.start()
-    time.sleep(1)  # 1s
-    ct2.stop()
+    with cyber_timer.Timer() as ct2:  # 10ms
+        ct2.set_option(10, fun, 0)
+        ct2.start()
+        time.sleep(1)  # 1s
+        ct2.stop()
+        time.sleep(0.5)
 
     cyber.shutdown()
 

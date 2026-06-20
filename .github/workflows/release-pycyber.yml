@@ -81,7 +81,7 @@ jobs:
           if [[ "${{ matrix.skip_sdist }}" == "true" ]]; then
             args+=(--skip-sdist)
           fi
-          bash scripts/release/build_and_package_pycyber.sh "${args[@]}"
+          PYTHON=python3.11 bash scripts/release/build_and_package_pycyber.sh "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,8 +91,34 @@ jobs:
             packaging/pycyber/wheelhouse/*.tar.gz
             packaging/pycyber/wheelhouse/*.whl
 
-  publish:
+  verify-python-compat:
     needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact_suffix: [linux-x86_64, linux-aarch64]
+        python-version: ["3.11"]
+    runs-on: ${{ matrix.artifact_suffix == 'linux-aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pycyber-${{ matrix.artifact_suffix }}
+          path: dist
+
+      - name: Validate wheel install/import on Python ${{ matrix.python-version }}
+        shell: bash
+        run: |
+          wheel="$(ls dist/*.whl | head -n1)"
+          python scripts/release/validate_pycyber.py --python python --wheel "$wheel"
+
+  publish:
+    needs: [build-wheel, verify-python-compat]
     if: startsWith(github.ref, 'refs/tags/pycyber-v')
     runs-on: ubuntu-22.04
     permissions:

@@ -54,6 +54,7 @@ const std::string& kClockChannel = "/clock";
 const std::string& kClockNode = "clock";
 
 bool g_atexit_registered = false;
+bool g_python_exit_handling = false;
 std::mutex g_mutex;
 std::unique_ptr<Node> clock_node;
 
@@ -86,6 +87,34 @@ void StopLogger() {
   }
 }
 
+void StopPythonParticipantThreads() {
+  if (auto* topology_manager =
+          service_discovery::TopologyManager::Instance(false);
+      topology_manager != nullptr) {
+    topology_manager->StopParticipantThread();
+  }
+  if (auto* transport_instance = transport::Transport::Instance(false);
+      transport_instance != nullptr) {
+    if (auto transport_participant = transport_instance->participant();
+        transport_participant != nullptr) {
+      transport_participant->StopEventThread();
+    }
+  }
+}
+
+void FinishClear(bool full_transport_cleanup) {
+  SysMo::CleanUp();
+  TimingWheel::CleanUp();
+  TaskManager::CleanUp();
+  scheduler::CleanUp();
+  if (full_transport_cleanup) {
+    transport::Transport::CleanUp();
+    service_discovery::TopologyManager::CleanUp();
+  }
+  StopLogger();
+  SetState(STATE_SHUTDOWN);
+}
+
 }  // namespace
 
 void OnShutdown(int sig) {
@@ -95,7 +124,13 @@ void OnShutdown(int sig) {
   }
 }
 
-void ExitHandle() { Clear(); }
+void ExitHandle() {
+  if (g_python_exit_handling) {
+    ClearForPythonExit();
+    return;
+  }
+  Clear();
+}
 
 bool Init(const char* binary_name) {
   std::lock_guard<std::mutex> lg(g_mutex);
@@ -144,14 +179,40 @@ void Clear() {
       clock_node.reset();
   }
 
-  SysMo::CleanUp();
-  TaskManager::CleanUp();
-  TimingWheel::CleanUp();
-  scheduler::CleanUp();
-  transport::Transport::CleanUp();
-  service_discovery::TopologyManager::CleanUp();
-  StopLogger();
-  SetState(STATE_SHUTDOWN);
+  FinishClear(true);
+}
+
+void ClearFromPython() {
+  std::lock_guard<std::mutex> lg(g_mutex);
+  if (GetState() == STATE_SHUTDOWN || GetState() == STATE_UNINITIALIZED) {
+    return;
+  }
+  SetState(STATE_SHUTTING_DOWN);
+  if (clock_node) {
+    clock_node.reset();
+  }
+
+  StopPythonParticipantThreads();
+  FinishClear(true);
+}
+
+void ClearForPythonExit() {
+  std::lock_guard<std::mutex> lg(g_mutex);
+  if (GetState() == STATE_SHUTDOWN || GetState() == STATE_UNINITIALIZED) {
+    return;
+  }
+  SetState(STATE_SHUTTING_DOWN);
+  if (clock_node) {
+    clock_node.reset();
+  }
+
+  StopPythonParticipantThreads();
+  FinishClear(false);
+}
+
+void EnablePythonExitHandling() {
+  std::lock_guard<std::mutex> lg(g_mutex);
+  g_python_exit_handling = true;
 }
 
 }  // namespace cyber

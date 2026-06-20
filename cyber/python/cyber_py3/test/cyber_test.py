@@ -22,7 +22,7 @@ import time
 import unittest
 
 from cyber.python.cyber_py3 import cyber
-from modules.common.util.testdata.simple_pb2 import SimpleMessage
+from cyber.proto.unit_test_pb2 import ChatterBenchmark
 
 
 class TestCyber(unittest.TestCase):
@@ -47,23 +47,28 @@ class TestCyber(unittest.TestCase):
         # Read.
         reader_node = cyber.Node("listener")
         reader = reader_node.create_reader("channel/chatter",
-                                           SimpleMessage, self.callback)
+                                           ChatterBenchmark, self.callback)
         self.assertEqual(reader.name, "channel/chatter")
-        self.assertEqual(reader.data_type, SimpleMessage)
-        self.assertEqual(SimpleMessage.DESCRIPTOR.full_name,
-                         "apollo.common.util.test.SimpleMessage")
+        self.assertEqual(reader.data_type, ChatterBenchmark)
+        self.assertEqual(
+            ChatterBenchmark.DESCRIPTOR.full_name,
+            "apollo.cyber.proto.ChatterBenchmark",
+        )
 
         # Write.
-        msg = SimpleMessage()
-        msg.text = "talker:send Alex!"
-        msg.integer = 0
+        msg = ChatterBenchmark()
+        msg.content = "talker:send Alex!"
+        msg.seq = 0
 
         self.assertTrue(cyber.ok())
         writer_node = cyber.Node("writer")
-        writer = writer_node.create_writer("channel/chatter", SimpleMessage, 7)
+        writer = writer_node.create_writer(
+            "channel/chatter", ChatterBenchmark, 7
+        )
         self.assertEqual(writer.name, "channel/chatter")
         self.assertEqual(
-            writer.data_type, "apollo.common.util.test.SimpleMessage")
+            writer.data_type, "apollo.cyber.proto.ChatterBenchmark"
+        )
         self.assertTrue(writer.write(msg))
 
         # Wait for data to be processed by callback function.
