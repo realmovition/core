@@ -35,12 +35,8 @@ For a narrower `pycyber`-focused build/test loop, use the existing Bazel targets
 
 ```bash
 bazel test --color=no --curses=no \
-  //cyber/python/internal:py_cyber_test \
-  //cyber/python/internal:py_record_test \
-  //cyber/python/cyber_py3/test:init_test \
-  //cyber/python/cyber_py3/test:cyber_test \
-  //cyber/python/cyber_py3/test:cyber_time_test \
-  //cyber/python/cyber_py3/test:record_test
+  //cyber/python/cyber_py3/test:all \
+  //cyber/python/cyber_py3/examples:examples_smoke_test
 ```
 
 ## Example
@@ -71,7 +67,7 @@ Quick start (recommended)
 1. Create and activate a virtual environment (venv):
 
 ```bash
-python3 -m venv .packaging-venv
+python3.11 -m venv .packaging-venv
 source .packaging-venv/bin/activate
 python -m pip install --upgrade pip
 pip install build auditwheel twine setuptools_scm
@@ -94,8 +90,8 @@ Artifacts and checks:
 - Artifacts are written to `packaging/pycyber/wheelhouse/`.
 - `packaging/pycyber/{staging,build,dist,wheelhouse}` are generated packaging outputs; keep the checked-in sources under `packaging/pycyber/` and `scripts/release/` as the canonical release inputs.
 - The script runs `twine check` and the repository's `validate_pycyber.py` smoke test.
-- A `SHA256SUMS` file is created in the wheelhouse.
-- Official release uploads currently publish one sdist plus CPython 3.11 Linux wheels for `x86_64` and `aarch64`.
+- A `SHA256SUMS` file is created in the wheelhouse; upload only `*.whl` and `*.tar.gz` to PyPI.
+- Official release uploads currently publish one sdist plus Linux wheels for `x86_64` and `aarch64`, built with CPython 3.11 as `cp311` platform wheels.
 
 Script flags:
 
@@ -130,7 +126,7 @@ auditwheel repair packaging/pycyber/dist/*.whl -w packaging/pycyber/wheelhouse
 4) Check metadata and run validation:
 
 ```bash
-python -m twine check packaging/pycyber/wheelhouse/*
+python -m twine check packaging/pycyber/wheelhouse/*.whl packaging/pycyber/wheelhouse/*.tar.gz
 python scripts/release/validate_pycyber.py --wheel packaging/pycyber/wheelhouse/*.whl
 ```
 
@@ -138,7 +134,7 @@ python scripts/release/validate_pycyber.py --wheel packaging/pycyber/wheelhouse/
 
 ```bash
 TWINE_USERNAME=__token__ TWINE_PASSWORD=$TEST_PYPI_TOKEN \
-  python -m twine upload --repository testpypi packaging/pycyber/wheelhouse/*
+  python -m twine upload --repository testpypi packaging/pycyber/wheelhouse/*.whl packaging/pycyber/wheelhouse/*.tar.gz
 
 # Test install from TestPyPI in a fresh venv:
 pip install --index-url https://test.pypi.org/simple/ --no-deps pycyber==0.0.7
@@ -148,7 +144,7 @@ pip install --index-url https://test.pypi.org/simple/ --no-deps pycyber==0.0.7
 
 ```bash
 TWINE_USERNAME=__token__ TWINE_PASSWORD=$PYPI_TOKEN \
-  python -m twine upload packaging/pycyber/wheelhouse/*
+  python -m twine upload packaging/pycyber/wheelhouse/*.whl packaging/pycyber/wheelhouse/*.tar.gz
 ```
 
 Versioning
@@ -179,4 +175,4 @@ Security and best practices
 CI
 
 - `.github/workflows/c-cpp.yml` runs the Ubuntu 22.04 Bzlmod baseline entrypoint.
-- `.github/workflows/release-pycyber.yml` is triggered by tags `pycyber-v*`. It checks out the full history (`fetch-depth: 0`) so `setuptools_scm` can compute versions correctly, builds the sdist once, and publishes CPython 3.11 Linux wheels for `x86_64` and `aarch64`.
+- `.github/workflows/release-pycyber.yml` is triggered by tags `pycyber-v*`. It checks out the full history (`fetch-depth: 0`) so `setuptools_scm` can compute versions correctly, builds release artifacts on `x86_64` and `aarch64`, then verifies wheel install/import on CPython 3.11 before publish.

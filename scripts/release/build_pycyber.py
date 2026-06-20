@@ -14,6 +14,7 @@ PROTO_ROOT = SRC_ROOT / "proto"
 
 PY_MODULES = [
     "__init__.py",
+    "_internal.py",
     "cyber.py",
     "cyber_time.py",
     "cyber_timer.py",
@@ -23,10 +24,6 @@ PY_MODULES = [
 
 EXTENSION_TARGETS = {
     "//cyber/python/internal:_cyber_wrapper.so": "_cyber_wrapper.so",
-    "//cyber/python/internal:_cyber_record_wrapper.so": "_cyber_record_wrapper.so",
-    "//cyber/python/internal:_cyber_time_wrapper.so": "_cyber_time_wrapper.so",
-    "//cyber/python/internal:_cyber_timer_wrapper.so": "_cyber_timer_wrapper.so",
-    "//cyber/python/internal:_cyber_parameter_wrapper.so": "_cyber_parameter_wrapper.so",
 }
 
 
@@ -54,12 +51,7 @@ def resolve_single_bazel_output(target: str) -> Path:
 def stage_python_modules() -> None:
     source_root = REPO_ROOT / "cyber" / "python" / "cyber_py3"
     for module_name in PY_MODULES:
-        content = (source_root / module_name).read_text()
-        content = content.replace(
-            "from cyber.python.cyber_py3 import ", "from pycyber import "
-        )
-        content = content.replace("../internal", "internal")
-        (SRC_ROOT / module_name).write_text(content)
+        shutil.copy2(source_root / module_name, SRC_ROOT / module_name)
 
 
 def stage_extensions() -> None:

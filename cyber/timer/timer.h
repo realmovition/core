@@ -17,8 +17,8 @@
 #ifndef CYBER_TIMER_TIMER_H_
 #define CYBER_TIMER_TIMER_H_
 
-#include <atomic>
 #include <memory>
+#include <mutex>
 
 #include "cyber/timer/timing_wheel.h"
 
@@ -106,6 +106,10 @@ class Timer {
   /**
    * @brief Stop the timer
    *
+   * Stop waits for already dispatched callbacks to finish. Do not call Stop()
+   * directly from this timer's native callback, or it will wait for the
+   * in-flight callback to return and deadlock.
+   *
    */
   void Stop();
 
@@ -114,8 +118,9 @@ class Timer {
   uint64_t timer_id_;
   TimerOption timer_opt_;
   TimingWheel* timing_wheel_ = nullptr;
+  std::mutex state_mutex_;
   std::shared_ptr<TimerTask> task_;
-  std::atomic<bool> started_ = {false};
+  bool started_ = false;
 };
 
 }  // namespace cyber

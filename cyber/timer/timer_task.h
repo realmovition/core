@@ -18,6 +18,8 @@
 #define CYBER_TIMER_TIMER_TASK_H_
 
 #include <functional>
+#include <condition_variable>
+#include <atomic>
 #include <mutex>
 
 namespace apollo {
@@ -34,6 +36,10 @@ struct TimerTask {
   uint64_t next_fire_duration_ms = 0;
   int64_t accumulated_error_ns = 0;
   uint64_t last_execute_time_ns = 0;
+  std::atomic<bool> cancelled{false};
+  std::atomic<uint64_t> callback_in_flight{0};
+  std::mutex callback_cv_mutex;
+  std::condition_variable callback_cv;
   std::mutex mutex;
 };
 

@@ -36,6 +36,12 @@ TopologyManager::TopologyManager()
 
 TopologyManager::~TopologyManager() { Shutdown(); }
 
+void TopologyManager::StopParticipantThread() {
+  if (participant_ != nullptr) {
+    participant_->StopEventThread();
+  }
+}
+
 void TopologyManager::Shutdown() {
   ADEBUG << "topology shutdown.";
   // avoid shutdown twice
@@ -47,9 +53,9 @@ void TopologyManager::Shutdown() {
   channel_manager_->Shutdown();
   service_manager_->Shutdown();
   participant_->Shutdown();
-
   delete participant_listener_;
   participant_listener_ = nullptr;
+  participant_ = nullptr;
 
   change_signal_.DisconnectAllSlots();
 }

@@ -77,6 +77,8 @@ class TopologyManager {
    */
   void Shutdown();
 
+  void StopParticipantThread();
+
   /**
    * @brief To observe the topology change, you can register a `ChangeFunc`
    *

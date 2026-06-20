@@ -24,19 +24,19 @@ py_test(
     timeout = "short",
     srcs = ["cyber_test.py"],
     deps = [
+        "//cyber/proto:unit_test_py_pb2",
         "//cyber/python/cyber_py3:cyber",
     ],
 )
-# FIXME(all): parameter_test seems to run forever
-# py_test(
-#    name = "parameter_test",
-#    timeout = "short",
-#    srcs = ["parameter_test.py"],
-#    deps = [
-#        "//cyber/python/cyber_py3:cyber",
-#        "//cyber/python/cyber_py3:parameter",
-#    ],
-#)
+py_test(
+    name = "parameter_test",
+    timeout = "short",
+    srcs = ["parameter_test.py"],
+    deps = [
+        "//cyber/python/cyber_py3:cyber",
+        "//cyber/python/cyber_py3:parameter",
+    ],
+)
 
 py_test(
     name = "cyber_time_test",
@@ -48,13 +48,24 @@ py_test(
     ],
 )
 
-# FIXME(all): cyber_timer_test can't terminate
-# py_test(
-#    name = "cyber_timer_test",
-#    timeout = "short",
-#    srcs = ["cyber_timer_test.py"],
-#    deps = [
-#        "//cyber/python/cyber_py3:cyber",
-#        "//cyber/python/cyber_py3:cyber_timer",
-#    ],
-#)
+py_test(
+    name = "cyber_timer_test",
+    timeout = "short",
+    srcs = ["cyber_timer_test.py"],
+    deps = [
+        "//cyber/python/cyber_py3:cyber",
+        "//cyber/python/cyber_py3:cyber_timer",
+    ],
+)
+
+py_test(
+    name = "shutdown_exit_test",
+    timeout = "short",
+    srcs = ["shutdown_exit_test.py"],
+    deps = [
+        "//cyber/proto:unit_test_py_pb2",
+        "//cyber/python/cyber_py3:cyber",
+        "//cyber/python/cyber_py3:cyber_timer",
+        "//cyber/python/cyber_py3:parameter",
+    ],
+)

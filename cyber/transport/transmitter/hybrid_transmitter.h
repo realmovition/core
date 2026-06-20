@@ -32,6 +32,7 @@
 #include "cyber/proto/transport_conf.pb.h"
 #include "cyber/task/task.h"
 #include "cyber/transport/message/history.h"
+#include "cyber/transport/message/pod_message.h"
 #include "cyber/transport/rtps/participant.h"
 #include "cyber/transport/transmitter/intra_transmitter.h"
 #include "cyber/transport/transmitter/iceoryx_transmitter.h"
@@ -70,6 +71,15 @@ inline void NormalizeHybridTransmitterCommunicationMode(
            << ", forcing RTPS for cross-host delivery";
     mode->set_diff_host(OptionalMode::RTPS);
   }
+}
+
+template <typename M>
+inline OptionalMode ResolveHybridTransmitterDiffProcMode(OptionalMode mode) {
+  // Keep hybrid diff-proc zero-copy on the explicit Pod contract only.
+  if (mode == OptionalMode::ICEORYX && !std::is_same<M, PodMessage>::value) {
+    return OptionalMode::RTPS;
+  }
+  return mode;
 }
 
 }  // namespace
@@ -280,7 +290,8 @@ void HybridTransmitter<M>::InitMode() {
   mode_ = std::make_shared<proto::CommunicationMode>();
   NormalizeHybridTransmitterCommunicationMode(mode_.get());
   mapping_table_[SAME_PROC] = mode_->same_proc();
-  mapping_table_[DIFF_PROC] = mode_->diff_proc();
+  mapping_table_[DIFF_PROC] =
+      ResolveHybridTransmitterDiffProcMode<M>(mode_->diff_proc());
   mapping_table_[DIFF_HOST] = mode_->diff_host();
 }
 
@@ -297,7 +308,8 @@ void HybridTransmitter<M>::ObtainConfig() {
   NormalizeHybridTransmitterCommunicationMode(mode_.get());
 
   mapping_table_[SAME_PROC] = mode_->same_proc();
-  mapping_table_[DIFF_PROC] = mode_->diff_proc();
+  mapping_table_[DIFF_PROC] =
+      ResolveHybridTransmitterDiffProcMode<M>(mode_->diff_proc());
   mapping_table_[DIFF_HOST] = mode_->diff_host();
 }
 
@@ -315,9 +327,9 @@ void HybridTransmitter<M>::InitHistory() {
 template <typename M>
 void HybridTransmitter<M>::InitTransmitters() {
   std::set<OptionalMode> modes;
-  modes.insert(mode_->same_proc());
-  modes.insert(mode_->diff_proc());
-  modes.insert(mode_->diff_host());
+  modes.insert(mapping_table_[SAME_PROC]);
+  modes.insert(mapping_table_[DIFF_PROC]);
+  modes.insert(mapping_table_[DIFF_HOST]);
   for (auto& mode : modes) {
     switch (mode) {
       case OptionalMode::INTRA:

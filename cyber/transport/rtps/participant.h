@@ -42,6 +42,7 @@ class Participant {
               eprosima::fastrtps::ParticipantListener* listener = nullptr);
   virtual ~Participant();
 
+  void StopEventThread();
   void Shutdown();
 
   eprosima::fastrtps::Participant* fastrtps_participant();

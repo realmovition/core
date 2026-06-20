@@ -1,4 +1,4 @@
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -23,6 +23,7 @@ py_binary(
     name = "timer",
     srcs = ["timer.py"],
     deps = [
+        "//cyber/proto:unit_test_py_pb2",
         "//cyber/python/cyber_py3:cyber",
         "//cyber/python/cyber_py3:cyber_timer",
     ],
@@ -50,6 +51,7 @@ py_binary(
     name = "parameter",
     srcs = ["parameter.py"],
     deps = [
+        "//cyber/proto:unit_test_py_pb2",
         "//cyber/python/cyber_py3:cyber",
         "//cyber/python/cyber_py3:parameter",
     ],
@@ -78,6 +80,21 @@ py_binary(
     srcs = ["record_trans.py"],
     deps = [
         "//cyber/python/cyber_py3:cyber",
+        "//cyber/python/cyber_py3:record",
+    ],
+)
+
+py_test(
+    name = "examples_smoke_test",
+    srcs = ["examples_smoke_test.py"],
+    data = glob(["*.py"]),
+    deps = [
+        "//cyber/proto:record_py_pb2",
+        "//cyber/proto:unit_test_py_pb2",
+        "//cyber/python/cyber_py3:cyber",
+        "//cyber/python/cyber_py3:cyber_time",
+        "//cyber/python/cyber_py3:cyber_timer",
+        "//cyber/python/cyber_py3:parameter",
         "//cyber/python/cyber_py3:record",
     ],
 )

@@ -17,6 +17,7 @@
 #include "cyber/timer/timer.h"
 
 #include <cmath>
+#include <mutex>
 
 #include "cyber/common/global_data.h"
 
@@ -46,7 +47,10 @@ Timer::Timer(uint32_t period, std::function<void()> callback, bool oneshot) {
   timer_opt_.oneshot = oneshot;
 }
 
-void Timer::SetTimerOption(TimerOption opt) { timer_opt_ = opt; }
+void Timer::SetTimerOption(TimerOption opt) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  timer_opt_ = opt;
+}
 
 bool Timer::InitTimerTask() {
   if (timer_opt_.period == 0) {
@@ -66,16 +70,17 @@ bool Timer::InitTimerTask() {
     std::weak_ptr<TimerTask> task_weak_ptr = task_;
     task_->callback = [callback = this->timer_opt_.callback, task_weak_ptr]() {
       auto task = task_weak_ptr.lock();
-      if (task) {
-        std::lock_guard<std::mutex> lg(task->mutex);
-        callback();
+      if (!task || task->cancelled.load(std::memory_order_acquire)) {
+        return;
       }
+      std::lock_guard<std::mutex> lg(task->mutex);
+      callback();
     };
   } else {
     std::weak_ptr<TimerTask> task_weak_ptr = task_;
     task_->callback = [callback = this->timer_opt_.callback, task_weak_ptr]() {
       auto task = task_weak_ptr.lock();
-      if (!task) {
+      if (!task || task->cancelled.load(std::memory_order_acquire)) {
         return;
       }
       std::lock_guard<std::mutex> lg(task->mutex);
@@ -120,7 +125,9 @@ bool Timer::InitTimerTask() {
                << " next fire: " << task->next_fire_duration_ms
                << " error ns: " << task->accumulated_error_ns;
       }
-      TimingWheel::Instance()->AddTask(task);
+      if (!task->cancelled.load(std::memory_order_acquire)) {
+        TimingWheel::Instance()->AddTask(task);
+      }
     };
   }
   return true;
@@ -131,31 +138,44 @@ void Timer::Start() {
     return;
   }
 
-  if (!started_.exchange(true)) {
-    if (InitTimerTask()) {
-      timing_wheel_->AddTask(task_);
-      AINFO << "start timer [" << task_->timer_id_ << "]";
+  std::shared_ptr<TimerTask> task;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (started_) {
+      return;
     }
+    if (!InitTimerTask()) {
+      return;
+    }
+    started_ = true;
+    task = task_;
   }
+  timing_wheel_->AddTask(task);
+  AINFO << "start timer [" << task->timer_id_ << "]";
 }
 
 void Timer::Stop() {
-  if (started_.exchange(false) && task_) {
-    AINFO << "stop timer, the timer_id: " << timer_id_;
-    // using a shared pointer to hold task_->mutex before task_ reset
-    auto tmp_task = task_;
-    {
-      std::lock_guard<std::mutex> lg(tmp_task->mutex);
-      task_.reset();
+  std::shared_ptr<TimerTask> task;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    started_ = false;
+    task = task_;
+    if (task) {
+      task->cancelled.store(true, std::memory_order_release);
     }
+    task_.reset();
   }
+  if (!task) {
+    return;
+  }
+  AINFO << "stop timer, the timer_id: " << timer_id_;
+  std::unique_lock<std::mutex> lock(task->callback_cv_mutex);
+  task->callback_cv.wait(lock, [&task]() {
+    return task->callback_in_flight.load(std::memory_order_acquire) == 0;
+  });
 }
 
-Timer::~Timer() {
-  if (task_) {
-    Stop();
-  }
-}
+Timer::~Timer() { Stop(); }
 
 }  // namespace cyber
 }  // namespace apollo

@@ -32,6 +32,7 @@
 #include "cyber/service_discovery/role/role.h"
 #include "cyber/task/task.h"
 #include "cyber/time/time.h"
+#include "cyber/transport/message/pod_message.h"
 #include "cyber/transport/receiver/iceoryx_receiver.h"
 #include "cyber/transport/receiver/intra_receiver.h"
 #include "cyber/transport/receiver/rtps_receiver.h"
@@ -69,6 +70,15 @@ inline void NormalizeHybridReceiverCommunicationMode(
            << ", forcing RTPS for cross-host delivery";
     mode->set_diff_host(OptionalMode::RTPS);
   }
+}
+
+template <typename M>
+inline OptionalMode ResolveHybridReceiverDiffProcMode(OptionalMode mode) {
+  // Keep hybrid diff-proc zero-copy on the explicit Pod contract only.
+  if (mode == OptionalMode::ICEORYX && !std::is_same<M, PodMessage>::value) {
+    return OptionalMode::RTPS;
+  }
+  return mode;
 }
 
 }  // namespace
@@ -196,7 +206,8 @@ void HybridReceiver<M>::InitMode() {
   mode_ = std::make_shared<proto::CommunicationMode>();
   NormalizeHybridReceiverCommunicationMode(mode_.get());
   mapping_table_[SAME_PROC] = mode_->same_proc();
-  mapping_table_[DIFF_PROC] = mode_->diff_proc();
+  mapping_table_[DIFF_PROC] =
+      ResolveHybridReceiverDiffProcMode<M>(mode_->diff_proc());
   mapping_table_[DIFF_HOST] = mode_->diff_host();
 }
 
@@ -213,7 +224,8 @@ void HybridReceiver<M>::ObtainConfig() {
   NormalizeHybridReceiverCommunicationMode(mode_.get());
 
   mapping_table_[SAME_PROC] = mode_->same_proc();
-  mapping_table_[DIFF_PROC] = mode_->diff_proc();
+  mapping_table_[DIFF_PROC] =
+      ResolveHybridReceiverDiffProcMode<M>(mode_->diff_proc());
   mapping_table_[DIFF_HOST] = mode_->diff_host();
 }
 
@@ -231,9 +243,9 @@ void HybridReceiver<M>::InitHistory() {
 template <typename M>
 void HybridReceiver<M>::InitReceivers() {
   std::set<OptionalMode> modes;
-  modes.insert(mode_->same_proc());
-  modes.insert(mode_->diff_proc());
-  modes.insert(mode_->diff_host());
+  modes.insert(mapping_table_[SAME_PROC]);
+  modes.insert(mapping_table_[DIFF_PROC]);
+  modes.insert(mapping_table_[DIFF_HOST]);
   auto listener = std::bind(&HybridReceiver<M>::OnNewMessage, this,
                             std::placeholders::_1, std::placeholders::_2);
   for (auto& mode : modes) {
