@@ -16,13 +16,24 @@
 
 #include "cyber/record/file/record_file_reader.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cstring>
+
 #include "cyber/common/file.h"
+#include "cyber/task/task.h"
 
 namespace apollo {
 namespace cyber {
 namespace record {
 
 using apollo::cyber::proto::SectionType;
+
+RecordFileReader::RecordFileReader() = default;
+
+RecordFileReader::~RecordFileReader() { Close(); }
 
 bool RecordFileReader::Open(const std::string& path) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -37,7 +48,41 @@ bool RecordFileReader::Open(const std::string& path) {
            << ", errno: " << errno;
     return false;
   }
-  end_of_file_ = false;
+
+  if (io_uring_queue_init(256, &ring_, 0) < 0) {
+    AERROR << "io_uring_queue_init failed, file: " << path_;
+    close(fd_);
+    fd_ = -1;
+    return false;
+  }
+  ring_initialized_ = true;
+
+  slots_.resize(kSlotCount);
+  registered_iovecs_.resize(kSlotCount);
+  for (int i = 0; i < kSlotCount; ++i) {
+    void* memory = nullptr;
+    if (posix_memalign(&memory, 4096, kSlotSize) != 0) {
+      AERROR << "Allocate slot memory failed, slot: " << i;
+      Close();
+      return false;
+    }
+    slots_[i].data = reinterpret_cast<char*>(memory);
+    slots_[i].capacity = kSlotSize;
+    slots_[i].state = BufferSlot::State::FREE;
+    registered_iovecs_[i].iov_base = slots_[i].data;
+    registered_iovecs_[i].iov_len = slots_[i].capacity;
+  }
+  if (io_uring_register_buffers(&ring_, registered_iovecs_.data(),
+                                registered_iovecs_.size()) < 0) {
+    AERROR << "io_uring_register_buffers failed, file: " << path_;
+    Close();
+    return false;
+  }
+
+  if (!SetPosition(0)) {
+    AERROR << "Initial read position setup failed, file: " << path_;
+    return false;
+  }
   if (!ReadHeader()) {
     AERROR << "Read header section fail, file: " << path_;
     return false;
@@ -45,15 +90,271 @@ bool RecordFileReader::Open(const std::string& path) {
   return true;
 }
 
+void RecordFileReader::ReleaseBuffers() {
+  if (ring_initialized_ && !registered_iovecs_.empty()) {
+    io_uring_unregister_buffers(&ring_);
+  }
+  for (auto& slot : slots_) {
+    if (slot.data != nullptr) {
+      free(slot.data);
+      slot.data = nullptr;
+    }
+    slot.state = BufferSlot::State::FREE;
+    slot.valid_size = 0;
+  }
+  slots_.clear();
+  registered_iovecs_.clear();
+  ready_slots_by_offset_.clear();
+}
+
 void RecordFileReader::Close() {
+  DrainInFlightReads();
+  ReleaseBuffers();
+  if (ring_initialized_) {
+    io_uring_queue_exit(&ring_);
+    ring_initialized_ = false;
+  }
   if (fd_ >= 0) {
     close(fd_);
     fd_ = -1;
   }
 }
 
+void RecordFileReader::ResetBufferState() {
+  ready_slots_by_offset_.clear();
+  in_flight_reads_ = 0;
+  current_slot_index_ = -1;
+  current_slot_pos_ = 0;
+  for (auto& slot : slots_) {
+    slot.state = BufferSlot::State::FREE;
+    slot.valid_size = 0;
+    slot.offset = 0;
+  }
+}
+
+void RecordFileReader::DrainInFlightReads() {
+  if (!ring_initialized_) {
+    return;
+  }
+  while (in_flight_reads_ > 0) {
+    bool completed = false;
+    if (!PollCompletions(true, &completed)) {
+      break;
+    }
+  }
+}
+
+bool RecordFileReader::SetPosition(uint64_t target_pos) {
+  if (fd_ < 0 || !ring_initialized_) {
+    return false;
+  }
+  DrainInFlightReads();
+  ResetBufferState();
+
+  logical_offset_ = target_pos;
+  stream_base_offset_ = target_pos;
+  next_submit_offset_ = target_pos;
+  end_of_file_ = false;
+  reached_physical_eof_ = false;
+
+  FillReadWindow();
+  return EnsureCurrentSlot();
+}
+
+void RecordFileReader::FillReadWindow() {
+  while (!reached_physical_eof_ && in_flight_reads_ < kPrefetchDepth) {
+    int free_slot = -1;
+    for (int i = 0; i < static_cast<int>(slots_.size()); ++i) {
+      if (slots_[i].state == BufferSlot::State::FREE) {
+        free_slot = i;
+        break;
+      }
+    }
+    if (free_slot < 0) {
+      break;
+    }
+    if (!SubmitRead(free_slot, next_submit_offset_)) {
+      break;
+    }
+    next_submit_offset_ += kSlotSize;
+  }
+}
+
+bool RecordFileReader::SubmitRead(int slot_index, uint64_t offset) {
+  struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+  if (sqe == nullptr) {
+    return false;
+  }
+  slots_[slot_index].offset = offset;
+  slots_[slot_index].state = BufferSlot::State::IN_FLIGHT;
+  io_uring_prep_read_fixed(sqe, fd_, slots_[slot_index].data,
+                           slots_[slot_index].capacity, offset, slot_index);
+  io_uring_sqe_set_data64(sqe, static_cast<uint64_t>(slot_index));
+  if (io_uring_submit(&ring_) < 0) {
+    slots_[slot_index].state = BufferSlot::State::FREE;
+    AERROR << "io_uring_submit read failed, file: " << path_;
+    return false;
+  }
+  ++in_flight_reads_;
+  return true;
+}
+
+bool RecordFileReader::PollCompletions(bool wait_for_one, bool* completed) {
+  *completed = false;
+  struct io_uring_cqe* cqe = nullptr;
+  if (wait_for_one && in_flight_reads_ > 0) {
+    if (io_uring_wait_cqe(&ring_, &cqe) < 0 || cqe == nullptr) {
+      AERROR << "io_uring_wait_cqe read failed, file: " << path_;
+      end_of_file_ = true;
+      return false;
+    }
+  }
+
+  while (true) {
+    if (cqe == nullptr && io_uring_peek_cqe(&ring_, &cqe) != 0) {
+      break;
+    }
+    *completed = true;
+    const int slot_index = static_cast<int>(io_uring_cqe_get_data64(cqe));
+    const int res = cqe->res;
+    io_uring_cqe_seen(&ring_, cqe);
+    cqe = nullptr;
+    --in_flight_reads_;
+
+    if (slot_index < 0 || slot_index >= static_cast<int>(slots_.size())) {
+      continue;
+    }
+    auto& slot = slots_[slot_index];
+    if (res < 0) {
+      AERROR << "io_uring read cqe error, file: " << path_ << ", res: " << res;
+      slot.state = BufferSlot::State::FREE;
+      end_of_file_ = true;
+      return false;
+    }
+    if (res == 0) {
+      slot.state = BufferSlot::State::FREE;
+      slot.valid_size = 0;
+      reached_physical_eof_ = true;
+      continue;
+    }
+    slot.valid_size = static_cast<size_t>(res);
+    slot.state = BufferSlot::State::READY;
+    ready_slots_by_offset_[slot.offset] = slot_index;
+    if (slot.valid_size < slot.capacity) {
+      reached_physical_eof_ = true;
+    }
+  }
+  FillReadWindow();
+  return true;
+}
+
+bool RecordFileReader::EnsureCurrentSlot() {
+  const uint64_t expected_slot_base =
+      stream_base_offset_ +
+      ((logical_offset_ - stream_base_offset_) / kSlotSize) * kSlotSize;
+
+  if (current_slot_index_ >= 0) {
+    auto& slot = slots_[current_slot_index_];
+    if (slot.state == BufferSlot::State::READY && slot.offset == expected_slot_base &&
+        current_slot_pos_ < slot.valid_size) {
+      return true;
+    }
+    slot.state = BufferSlot::State::FREE;
+    current_slot_index_ = -1;
+    current_slot_pos_ = 0;
+  }
+
+  while (true) {
+    auto it = ready_slots_by_offset_.find(expected_slot_base);
+    if (it != ready_slots_by_offset_.end()) {
+      current_slot_index_ = it->second;
+      ready_slots_by_offset_.erase(it);
+      current_slot_pos_ =
+          static_cast<size_t>(logical_offset_ - slots_[current_slot_index_].offset);
+      if (current_slot_pos_ >= slots_[current_slot_index_].valid_size) {
+        slots_[current_slot_index_].state = BufferSlot::State::FREE;
+        current_slot_index_ = -1;
+        current_slot_pos_ = 0;
+        end_of_file_ = true;
+        return false;
+      }
+      return true;
+    }
+    if (reached_physical_eof_ && in_flight_reads_ == 0) {
+      end_of_file_ = true;
+      return false;
+    }
+    bool completed = false;
+    if (!PollCompletions(false, &completed)) {
+      return false;
+    }
+    if (!completed) {
+      if (in_flight_reads_ <= 0) {
+        end_of_file_ = true;
+        return false;
+      }
+      apollo::cyber::Yield();
+    }
+  }
+}
+
+bool RecordFileReader::ReadBytes(void* output, size_t size) {
+  char* out = reinterpret_cast<char*>(output);
+  size_t copied = 0;
+  while (copied < size) {
+    if (!EnsureCurrentSlot()) {
+      if (!end_of_file_) {
+        AERROR << "Buffered data unavailable, need bytes: " << size;
+      }
+      return false;
+    }
+    auto& slot = slots_[current_slot_index_];
+    const size_t available = slot.valid_size - current_slot_pos_;
+    const size_t take = std::min(available, size - copied);
+    memcpy(out + copied, slot.data + current_slot_pos_, take);
+    current_slot_pos_ += take;
+    logical_offset_ += take;
+    copied += take;
+    if (current_slot_pos_ >= slot.valid_size) {
+      slot.state = BufferSlot::State::FREE;
+      current_slot_index_ = -1;
+      current_slot_pos_ = 0;
+      FillReadWindow();
+    }
+  }
+  return true;
+}
+
+bool RecordFileReader::AcquireContiguousPayload(size_t size, const char** payload) {
+  if (size == 0) {
+    *payload = nullptr;
+    return true;
+  }
+  if (!EnsureCurrentSlot()) {
+    return false;
+  }
+  auto& slot = slots_[current_slot_index_];
+  if (slot.valid_size - current_slot_pos_ < size) {
+    return false;
+  }
+  *payload = slot.data + current_slot_pos_;
+  return true;
+}
+
+void RecordFileReader::AdvanceLogicalOffset(size_t size) {
+  logical_offset_ += size;
+  current_slot_pos_ += size;
+  if (current_slot_index_ >= 0 &&
+      current_slot_pos_ >= slots_[current_slot_index_].valid_size) {
+    slots_[current_slot_index_].state = BufferSlot::State::FREE;
+    current_slot_index_ = -1;
+    current_slot_pos_ = 0;
+    FillReadWindow();
+  }
+}
+
 bool RecordFileReader::Reset() {
-  if (!SetPosition(sizeof(struct Section) + HEADER_LENGTH)) {
+  if (!SetPosition(sizeof(Section) + HEADER_LENGTH)) {
     AERROR << "Reset position fail, file: " << path_;
     return false;
   }
@@ -79,7 +380,7 @@ bool RecordFileReader::ReadHeader() {
               "file.";
     return false;
   }
-  if (!SetPosition(sizeof(struct Section) + HEADER_LENGTH)) {
+  if (!SetPosition(sizeof(Section) + HEADER_LENGTH)) {
     AERROR << "Skip bytes for reaching the nex section failed.";
     return false;
   }
@@ -110,45 +411,41 @@ bool RecordFileReader::ReadIndex() {
     AERROR << "Read index section fail.";
     return false;
   }
-  Reset();
-  return true;
+  return Reset();
 }
 
 bool RecordFileReader::ReadSection(Section* section) {
-  ssize_t count = read(fd_, section, sizeof(struct Section));
-  if (count < 0) {
-    AERROR << "Read fd failed, fd_: " << fd_ << ", errno: " << errno;
-    return false;
-  } else if (count == 0) {
-    end_of_file_ = true;
-    AINFO << "Reach end of file.";
-    return false;
-  } else if (count != sizeof(struct Section)) {
-    AERROR << "Read fd failed, fd_: " << fd_
-           << ", expect count: " << sizeof(struct Section)
-           << ", actual count: " << count;
+  if (!ReadBytes(section, sizeof(Section))) {
     return false;
   }
   return true;
 }
 
 bool RecordFileReader::SkipSection(int64_t size) {
-  int64_t pos = CurrentPosition();
-  if (size > INT64_MAX - pos) {
-    AERROR << "Current position plus skip count is larger than INT64_MAX, "
-           << pos << " + " << size << " > " << INT64_MAX;
+  if (size < 0) {
+    AERROR << "Skip size must be non-negative, actual: " << size;
     return false;
   }
-  if (!SetPosition(pos + size)) {
-    AERROR << "Skip failed, file: " << path_ << ", current position: " << pos
-           << "skip count: " << size;
-    return false;
+  if (size == 0) {
+    return true;
   }
-  return true;
-}
-
-RecordFileReader::~RecordFileReader() {
-  Close();
+  const uint64_t target = logical_offset_ + static_cast<uint64_t>(size);
+  if (current_slot_index_ >= 0) {
+    auto& slot = slots_[current_slot_index_];
+    const size_t available = slot.valid_size - current_slot_pos_;
+    if (static_cast<uint64_t>(available) >= static_cast<uint64_t>(size)) {
+      current_slot_pos_ += static_cast<size_t>(size);
+      logical_offset_ = target;
+      if (current_slot_pos_ >= slot.valid_size) {
+        slot.state = BufferSlot::State::FREE;
+        current_slot_index_ = -1;
+        current_slot_pos_ = 0;
+        FillReadWindow();
+      }
+      return true;
+    }
+  }
+  return SetPosition(target);
 }
 
 }  // namespace record

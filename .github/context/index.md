@@ -4,6 +4,7 @@
 
 - `design/build-release-architecture.md` — Bzlmod-first build/release structure, lockfile policy, and artifact flow.
 - `design/bzlmod-readiness-assessment.md` — current Bazel rule replacement status in `bazel/` and Bzlmod readiness gaps.
+- `design/record-io-uring-migration.md` — record 文件 io_uring 迁移方案、benchmark 设计与 baseline 对比结果。
 - `skills/bzlmod-build-release.md` — concrete commands for Ubuntu 22.04 baseline validation and release packaging.
 
 ## Middleware roadmap

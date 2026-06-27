@@ -17,61 +17,59 @@
 #ifndef CYBER_RECORD_FILE_RECORD_FILE_WRITER_H_
 #define CYBER_RECORD_FILE_RECORD_FILE_WRITER_H_
 
+#include <liburing.h>
+#include <sys/uio.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
-#include <fstream>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
-#include <utility>
+#include <vector>
 
-#include "google/protobuf/io/zero_copy_stream_impl.h"
 #include "google/protobuf/message.h"
-#include "google/protobuf/text_format.h"
 
 #include "cyber/common/log.h"
 #include "cyber/record/file/record_file_base.h"
 #include "cyber/record/file/section.h"
-#include "cyber/time/time.h"
 
 namespace apollo {
 namespace cyber {
 namespace record {
 
 struct Chunk {
-  Chunk() { clear(); }
+  Chunk();
+  void clear();
+  void add(const proto::SingleMessage& message);
+  void add(const std::string& channel_name, uint64_t time_ns, const char* payload,
+           size_t payload_size);
+  bool empty() const;
 
-  inline void clear() {
-    body_.reset(new proto::ChunkBody());
-    header_.set_begin_time(0);
-    header_.set_end_time(0);
-    header_.set_message_number(0);
-    header_.set_raw_size(0);
-  }
-
-  inline void add(const proto::SingleMessage& message) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    proto::SingleMessage* p_message = body_->add_messages();
-    *p_message = message;
-    if (header_.begin_time() == 0) {
-      header_.set_begin_time(message.time());
-    }
-    if (header_.begin_time() > message.time()) {
-      header_.set_begin_time(message.time());
-    }
-    if (header_.end_time() < message.time()) {
-      header_.set_end_time(message.time());
-    }
-    header_.set_message_number(header_.message_number() + 1);
-    header_.set_raw_size(header_.raw_size() + message.content().size());
-  }
-
-  inline bool empty() { return header_.message_number() == 0; }
-
-  std::mutex mutex_;
   proto::ChunkHeader header_;
-  std::unique_ptr<proto::ChunkBody> body_ = nullptr;
+  std::vector<char> body_bytes_;
+};
+
+struct ChunkBuffer {
+  void Clear() {
+    begin_time = 0;
+    end_time = 0;
+    message_number = 0;
+    raw_size = 0;
+    body_bytes.clear();
+  }
+  bool Empty() const { return message_number == 0; }
+
+  uint64_t begin_time = 0;
+  uint64_t end_time = 0;
+  uint64_t message_number = 0;
+  uint64_t raw_size = 0;
+  std::vector<char> body_bytes;
 };
 
 class RecordFileWriter : public RecordFileBase {
@@ -86,19 +84,145 @@ class RecordFileWriter : public RecordFileBase {
   uint64_t GetMessageNumber(const std::string& channel_name) const;
 
  private:
-  bool WriteChunk(const proto::ChunkHeader& chunk_header,
-                  const proto::ChunkBody& chunk_body);
+  struct MessageSlot {
+    std::string channel_name;
+    uint64_t time_ns = 0;
+    std::array<char, 256> inline_payload = {};
+    std::unique_ptr<char[]> heap_payload;
+    size_t payload_size = 0;
+    size_t payload_capacity = inline_payload.size();
+    bool use_inline_payload = true;
+    int next_free = -1;
+    bool Store(const proto::SingleMessage& message);
+    const char* PayloadData() const {
+      return use_inline_payload ? inline_payload.data() : heap_payload.get();
+    }
+    void Reset() {
+      channel_name.clear();
+      time_ns = 0;
+      payload_size = 0;
+      use_inline_payload = true;
+    }
+  };
+
+  class SlotPool {
+   public:
+    bool Init(size_t capacity);
+    int Acquire();
+    void Release(int index);
+    MessageSlot* At(int index);
+
+   private:
+    std::vector<MessageSlot> slots_;
+    std::atomic<int> free_head_{-1};
+  };
+
+  class BoundedMpscRing {
+   public:
+    bool Init(size_t capacity);
+    bool Push(int slot_index);
+    bool Pop(int* slot_index);
+    bool Empty() const;
+
+   private:
+    size_t capacity_ = 0;
+    size_t mask_ = 0;
+    std::unique_ptr<std::atomic<int>[]> data_;
+    std::atomic<uint64_t> head_{0};
+    std::atomic<uint64_t> tail_{0};
+  };
+
+  struct InflightWrite {
+    enum class OpKind { kWritev, kWriteFixed };
+    OpKind op_kind = OpKind::kWritev;
+    Section section_a = {};
+    Section section_b = {};
+    std::vector<char> payload_a;
+    std::vector<char> payload_b;
+    std::array<struct iovec, 4> iov = {};
+    int iovcnt = 0;
+    size_t expected = 0;
+    int chunk_buffer_index = -1;
+    size_t fixed_nbytes = 0;
+    int fixed_buf_index = -1;
+  };
+
+  struct ChunkWriteBuffer {
+    enum class State { FREE, FILLING, SUBMITTED };
+    std::vector<char> storage;
+    size_t used = 0;
+    uint64_t message_number = 0;
+    proto::ChunkHeader header;
+    State state = State::FREE;
+  };
+
+  bool WriteChunk(Chunk* chunk);
   template <typename T>
   bool WriteSection(const T& message);
+  bool WriteSectionRaw(proto::SectionType type, std::vector<char>&& payload);
+  bool WriteChunkBodyFromFixedBuffer(int buffer_index);
+  int AcquireChunkWriteBufferLocked();
+  void InitChunkBuffers();
+  void ResetChunkBuffers();
   bool WriteIndex();
-  void Flush();
-  std::atomic_bool is_writing_;
-  std::unique_ptr<Chunk> chunk_active_ = nullptr;
-  std::unique_ptr<Chunk> chunk_flush_ = nullptr;
-  std::shared_ptr<std::thread> flush_thread_ = nullptr;
-  std::mutex flush_mutex_;
-  std::condition_variable flush_cv_;
+  void BackendLoop();
+
+  bool InitIoUring();
+  bool SubmitWritev(std::unique_ptr<InflightWrite> request, uint64_t offset);
+  bool SubmitWriteFixed(std::unique_ptr<InflightWrite> request, uint64_t offset);
+  bool PollCompletions(bool wait_for_one, bool* completed);
+  bool FlushCompletions();
+  void SubmitBatchIfNeeded(bool force_submit);
+  bool SubmitHeaderRewrite(const proto::Header& header);
+  uint64_t CurrentPosition() const { return logical_position_; }
+  bool EnqueueMessage(const proto::SingleMessage& message);
+  void HandleDrop(uint64_t payload_bytes);
+  bool FlushActiveChunk();
+  bool FlushActiveChunkLocked();
+  void ResetBatchStateLocked();
+
+  std::atomic_bool is_writing_{false};
+  std::thread backend_thread_;
+  mutable std::mutex queue_wait_mutex_;
+  std::condition_variable queue_wait_cv_;
+
+  SlotPool slot_pool_;
+  BoundedMpscRing queue_;
+  Chunk chunk_active_;
+  std::atomic<uint64_t> dropped_frames_{0};
+  std::atomic<uint64_t> dropped_bytes_{0};
+  std::atomic<uint64_t> dropped_since_alert_{0};
+
   std::unordered_map<std::string, uint64_t> channel_message_number_map_;
+  mutable std::mutex channel_map_mutex_;
+
+  struct io_uring ring_ = {};
+  bool ring_initialized_ = false;
+  bool ring_fixed_file_registered_ = false;
+  bool ring_fixed_buffers_registered_ = false;
+  bool io_failed_ = false;
+  int in_flight_io_ = 0;
+  int pending_submit_count_ = 0;
+  uint64_t logical_position_ = 0;
+  uint64_t next_disk_offset_ = 0;
+  mutable std::mutex io_mutex_;
+  uint64_t batch_message_count_ = 0;
+  uint64_t batch_payload_bytes_ = 0;
+  std::chrono::steady_clock::time_point batch_start_time_;
+  bool batch_open_ = false;
+  std::vector<ChunkWriteBuffer> chunk_buffers_;
+  std::vector<struct iovec> registered_iovecs_;
+
+  static constexpr size_t kQueueCapacity = 16384;
+  static constexpr uint64_t kDropAlertEveryFrames = 100;
+  static constexpr int kRingDepth = 128;
+  static constexpr int kSubmitBatch = 16;
+  static constexpr int kChunkBufferCount = 8;
+  static constexpr size_t kChunkBufferSize = 2 * 1024 * 1024;
+  static constexpr int kMaxInflightChunks = 8;
+  static constexpr uint64_t kMaxBatchMsgs = 64;
+  static constexpr uint64_t kMaxBatchBytes = 2 * 1024 * 1024;
+  static constexpr uint64_t kMaxBatchWaitUs = 20000;
 };
 
 template <typename T>
@@ -110,53 +234,19 @@ bool RecordFileWriter::WriteSection(const T& message) {
     type = proto::SectionType::SECTION_CHUNK_BODY;
   } else if (std::is_same<T, proto::Channel>::value) {
     type = proto::SectionType::SECTION_CHANNEL;
-  } else if (std::is_same<T, proto::Header>::value) {
-    type = proto::SectionType::SECTION_HEADER;
-    if (!SetPosition(0)) {
-      AERROR << "Jump to position #0 failed";
-      return false;
-    }
   } else if (std::is_same<T, proto::Index>::value) {
     type = proto::SectionType::SECTION_INDEX;
   } else {
     AERROR << "Do not support this template typename.";
     return false;
   }
-  Section section;
-  /// zero out whole struct even if padded
-  memset(&section, 0, sizeof(section));
-  section = {type, static_cast<int64_t>(message.ByteSizeLong())};
-  ssize_t count = write(fd_, &section, sizeof(section));
-  if (count < 0) {
-    AERROR << "Write fd failed, fd: " << fd_ << ", errno: " << errno;
+
+  std::vector<char> payload(message.ByteSizeLong());
+  if (!message.SerializeToArray(payload.data(), static_cast<int>(payload.size()))) {
+    AERROR << "Serialize section payload failed, type: " << type;
     return false;
   }
-  if (count != sizeof(section)) {
-    AERROR << "Write fd failed, fd: " << fd_
-           << ", expect count: " << sizeof(section)
-           << ", actual count: " << count;
-    return false;
-  }
-  {
-    google::protobuf::io::FileOutputStream raw_output(fd_);
-    message.SerializeToZeroCopyStream(&raw_output);
-  }
-  if (type == proto::SectionType::SECTION_HEADER) {
-    static char blank[HEADER_LENGTH] = {'0'};
-    count = write(fd_, &blank, HEADER_LENGTH - message.ByteSizeLong());
-    if (count < 0) {
-      AERROR << "Write fd failed, fd: " << fd_ << ", errno: " << errno;
-      return false;
-    }
-    if (static_cast<size_t>(count) != HEADER_LENGTH - message.ByteSizeLong()) {
-      AERROR << "Write fd failed, fd: " << fd_
-             << ", expect count: " << sizeof(section)
-             << ", actual count: " << count;
-      return false;
-    }
-  }
-  header_.set_size(CurrentPosition());
-  return true;
+  return WriteSectionRaw(type, std::move(payload));
 }
 
 }  // namespace record

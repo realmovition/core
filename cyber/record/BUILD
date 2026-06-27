@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -29,7 +29,9 @@ cc_library(
         ":record_file_base",
         ":section",
         "//cyber/common:file",
+        "//cyber/task",
         "//cyber/time",
+        "@liburing//:liburing",
         "@com_google_protobuf//:protobuf",
     ],
 )
@@ -42,7 +44,9 @@ cc_library(
         ":record_file_base",
         ":section",
         "//cyber/common:file",
+        "//cyber/task",
         "//cyber/time",
+        "@liburing//:liburing",
         "@com_google_protobuf//:protobuf",
     ],
 )
@@ -156,5 +160,28 @@ cc_library(
         "//cyber/message:message_traits",
         "//cyber/message:raw_message",
         "//cyber/proto:record_cc_proto",
+    ],
+)
+
+cc_binary(
+    name = "record_io_perf",
+    srcs = ["file/record_io_perf.cc"],
+    deps = [
+        ":header_builder",
+        ":record_file_reader",
+        ":record_file_writer",
+        "//cyber/common:file",
+        "//cyber/proto:record_cc_proto",
+    ],
+)
+
+cc_binary(
+    name = "record_perf_reader",
+    srcs = ["file/record_perf_reader.cc"],
+    deps = [
+        ":section",
+        "//cyber/proto:record_cc_proto",
+        "@liburing//:liburing",
+        "@com_google_protobuf//:protobuf",
     ],
 )
