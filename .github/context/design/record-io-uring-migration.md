@@ -20,12 +20,12 @@
 
 ### 2.2 Writer
 
-- 写路径重构为生产者/消费者流水线：
-  - **Producer**：`WriteMessage` 仅做入队，先从 `SlotPool` 申请槽位、填充 `SingleMessage`，再推入有界 `Bounded MPSC Ring`。
-  - **Backpressure**：队列满时执行 **Drop & Alert**（丢弃当前帧并累计计数），按固定阈值限频告警 `Record queue overflow`，不阻塞生产者线程。
-  - **Backend Writer**：独立单线程从队列批量消费，聚合为 `Chunk`，并统一执行磁盘落盘。
-  - **io_uring writev**：Section 使用 `io_uring_prep_writev()` 提交（`Section` 头与 payload 分离 iovec），减少拼接拷贝；提交采用批次刷入并通过 completion 回收请求对象。
-  - **Slot return**：消息一旦进入 backend 的 `Chunk`，对应槽位立即归还 `SlotPool`，维持运行期零动态节点分配。
+- 写路径当前采用**chunk 级双缓冲控制面**：
+  - **Producer**：`WriteMessage` 直接向 `active_chunk` 追加编码后的 `SingleMessage`，不再做消息级队列入队。
+  - **Flush handoff**：仅当 `chunk_interval` / `chunk_raw_size` 触发时，producer 才把完整 `Chunk` 与 `flush_chunk` 交换，并唤醒 backend。
+  - **Backend Writer**：独立单线程仅负责持久化完整 `Chunk`；不再承担消息级聚合职责。
+  - **磁盘写入**：使用阻塞 `pwritev()` 按顺序写入 `(chunk_header section + payload + chunk_body section + payload)`，保留数据面上的 `writev` 聚合，但回退掉写侧 `io_uring` 控制面。
+  - **Backpressure**：若上一个 `flush_chunk` 尚未被 backend 取走，producer 在 chunk 边界等待 flush 槽位；不再使用消息级 `SlotPool` / `MPSC Ring` / `Drop & Alert`。
 
 ### 2.3 O_DIRECT 调整
 
@@ -39,6 +39,7 @@
 - `.bazelrc` 增加官方 BCR registry：
   - `build --registry=https://bcr.bazel.build`
   以确保 `liburing@2.14.bcr.1` 可解析。
+- 当前 `liburing` 主要仍用于 reader 与 `record_perf_reader` 基准；writer 已回退到更简洁的 chunk 级 `pwritev` 控制面。
 
 ## 3. 性能测试设计
 
@@ -412,3 +413,288 @@ bazel build //cyber/record:record_perf_reader
 - 必须满足：`sys_cpu_ms` 明显下降（建议阈值 ≥10%），且吞吐不下降、wall 不恶化。
 - 若改动效果在噪声区间（小幅涨跌、无法复现），视为无收益，不合入。
 - 若改动在任一核心指标上显著退化，立即回退，并把实验数据与结论记录到本文件。
+
+## 17. 2026-06-27 写侧控制面回退重构（当前实现）
+
+### 17.1 重构动机
+
+- 先前写侧实现把 regular-file 写入做成了“消息级 `SlotPool + MPSC + backend + io_uring completion`”流水线。
+- 但真实热路径中，`RecordWriter` / `Recorder` 已经在更上层串行化写调用；写侧并不存在值得为之付费的多生产者并发。
+- 同时，旧写侧内部的 `kMaxBatchMsgs=64` / `kMaxBatchBytes=2MB` 会覆盖 benchmark 里设置的 `chunk_raw_size=4MB`，导致实际 chunk 策略与 header 配置不一致。
+
+### 17.2 当前写侧架构
+
+- `WriteMessage` 直接向 `active_chunk` 追加手工编码后的 `SingleMessage`。
+- 仅在 chunk 边界（`chunk_interval` / `chunk_raw_size`）发生一次控制面切换：`active_chunk <-> flush_chunk`。
+- backend 线程只负责持久化完整 `Chunk`，不再承担消息级聚合。
+- 持久化使用阻塞 `pwritev()` 顺序写入完整 chunk，保留数据面上的 gather write，但移除写侧 `io_uring` 控制面。
+- 当 `flush_chunk` 尚未被 backend 取走时，producer 只在 chunk 边界等待，不再做消息级 drop。
+
+### 17.3 合成基准（`record_io_perf 30000 4096`）
+
+| 实现 | 采样 | 写入 wall (ms) | 写入吞吐 (MiB/s) | 写入 user (ms) | 写入 sys (ms) | 写入 max RSS (KB) |
+|---|---:|---:|---:|---:|---:|---:|
+| 阻塞基线（历史，见 4.1） | 3 次均值 | 157.139 | 746.041 | 46.597 | 35.249 | 16693.333 |
+| 消息级 io_uring writer（本地重构前） | 8 次均值 | 44.065 | 2668.329 | 47.458 | 57.846 | 87971 |
+| chunk 级双缓冲 `pwritev` writer（当前） | 12 次均值 | 44.487 | 2643.353 | 21.176 | 43.468 | 28859 |
+
+对比“本地重构前”的消息级 io_uring writer：
+
+- `sys_cpu_ms`：**-24.85%**
+- `user_cpu_ms`：**-55.38%**
+- `max_rss_kb`：**-67.20%**
+- `wall_ms`：**+0.96%**
+- `throughput_mib_s`：**-0.94%**
+
+=> 这次重构的主要收益是：用极小的 wall/吞吐回撤，换回明显更低的 sys/user/RSS。
+
+### 17.4 固定总字节下的粒度敏感性
+
+固定总 payload `122,880,000` bytes，对比不同消息粒度（当前实现，4 次均值）：
+
+| case | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| `120000 x 1024` | 62.039 | 1889.333 | 52.849 | 45.675 | 29278 |
+| `30000 x 4096` | 44.999 | 2610.922 | 20.143 | 45.154 | 28876 |
+| `7500 x 16384` | 44.464 | 2652.148 | 10.917 | 44.811 | 31956 |
+
+对比重构前的消息级 io_uring writer（同样固定总字节，本地 4 次均值）：
+
+- `120000 x 1024`：`sys=50.63 ms`
+- `30000 x 4096`：`sys=59.32 ms`
+- `7500 x 16384`：`sys=66.86 ms`
+
+=> 当前实现下，`sys` 基本稳定在 **45ms** 左右，不再随着 payload 粒度放大而明显上升；这说明写侧 sys 的主要矛盾已经从“消息级控制面放大效应”转回到更稳定的 chunk 级 buffered write 成本。
+
+### 17.5 当前结论
+
+- 读侧保留 `io_uring` 是合理的：真实 record 回放能稳定换来更低 syscall 数、更低 sys、更低 RSS。
+- 写侧继续保留 `io_uring` 控制面的收益不稳定，且与实际串行写 workload 不匹配；当前更合适的边界是：
+  - **producer 负责 chunk 组装**
+  - **backend 负责 chunk 落盘**
+  - **磁盘接口使用简单顺序 `pwritev`**
+- 后续若继续压低写入 `sys`，应优先验证：
+  - backend 线程是否仍值得保留（与同步 chunk flush 对比）
+  - 更贴合 `chunk_raw_size` 的 body capacity 预留策略
+  - 只在保持 wall/吞吐不退化的前提下，再考虑更激进的异步提交
+
+## 18. 2026-06-28 写侧方案验证：`pwritev + posix_fallocate + large chunk + group commit`
+
+### 18.1 验证目标
+
+- 不引入消息级 drop：继续使用 ping-pong `ChunkBuffer`（`active_chunk` / `flush_chunk`）；
+- 按 chunk 边界写盘（`ChunkBuilder + pwritev`）；
+- 使用 `posix_fallocate` 预分配文件空间；
+- `fdatasync` 采用 group commit（按大字节阈值），而不是每条消息 sync；
+- 对比“baseline（上一版异步 io_uring writer）”和“当前实现”性能。
+
+### 18.2 运行时开关
+
+- `WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES`：预分配步长，默认 `256MB`，设 `0` 可关闭。
+- `WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES`：group commit 阈值，默认 `0`（不主动 `fdatasync`）。
+- `record_io_perf` 第 3 个参数为 `chunk_raw_size_bytes`，用于大 chunk 实验。
+
+示例：
+
+```bash
+# 4MB chunk + prealloc + no fdatasync
+WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES=$((256*1024*1024)) \
+WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES=0 \
+./bazel-bin/cyber/record/record_io_perf 30000 4096 $((4*1024*1024))
+
+# 16MB chunk + 64MB group commit fdatasync
+WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES=$((256*1024*1024)) \
+WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES=$((64*1024*1024)) \
+./bazel-bin/cyber/record/record_io_perf 30000 4096 $((16*1024*1024))
+```
+
+### 18.3 结果（`30000 x 4096`，12 次均值）
+
+| 实现 | 写入 wall (ms) | 写入吞吐 (MiB/s) | 写入 user (ms) | 写入 sys (ms) | 写入 RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| baseline：chunk 级异步 io_uring writer（上一版） | 55.023 | 2142.557 | 28.525 | 66.229 | 44355 |
+| 当前：`pwritev` + prealloc(256MB) + 4MB chunk + no fdatasync | 41.236 | 2860.037 | 19.184 | 41.236 | 28331 |
+| 当前：`pwritev` + no prealloc + 4MB chunk + no fdatasync | 42.314 | 2770.753 | 19.988 | 41.540 | 28357 |
+| 变体：`pwritev` + prealloc + 8MB chunk + no fdatasync | 63.338 | 1867.278 | 26.338 | 58.543 | 48636 |
+| 变体：`pwritev` + prealloc + 16MB chunk + no fdatasync | 73.257 | 1600.555 | 27.631 | 67.406 | 89628 |
+| 变体：`pwritev` + prealloc + 4MB chunk + fdatasync(64MB) | 230.785 | 508.075 | 29.165 | 77.576 | 28349 |
+| 变体：`pwritev` + prealloc + 16MB chunk + fdatasync(64MB) | 260.374 | 450.295 | 35.674 | 100.624 | 89643 |
+
+### 18.4 结论
+
+- 在当时测试集合（4MB/8MB/16MB + fdatasync 变体）里，最优点是：**4MB chunk + `pwritev` + `posix_fallocate` + no fdatasync**。
+- 相比 baseline（上一版异步 io_uring writer），该方案在 wall/吞吐/sys/RSS 全面更优（特别是 `sys` 约下降 37.7%）。
+- “大 chunk”在本次合成基准上显著退化（wall 变长、sys 升高、RSS 升高），未体现收益。
+- `fdatasync(64MB)` group commit 在该磁盘环境下代价很高；若场景允许，性能优先路径应维持 no fdatasync。
+
+## 19. 2026-06-28 三版本深度对比（pre / io_uring / current）
+
+### 19.1 对比口径
+
+- 版本：
+  - pre：`a388859^`（最早非 io_uring 写侧版本）
+  - io_uring：`a388859`
+  - current：当前 `chunk 级双缓冲 + pwritev` 主线实现
+- 统一负载：`record_io_perf 30000 4096`，round-robin 10 次均值。
+- current 统一开启：
+  - `WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES=256MB`
+  - `WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES=0`
+
+### 19.2 按“当前各版本默认行为”对比（pre=4MB、current=4MB、io_uring 实际受内部 64 msg cap 约束）
+
+写入阶段：
+
+| 版本 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| pre (`a388859^`, 4MB) | 146.778 | 799.013 | 20.462 | 37.240 | 13600.0 |
+| io_uring (`a388859`) | 40.870 | 2872.479 | 45.004 | 53.820 | 84175.6 |
+| current (`pwritev`, 4MB) | 40.875 | 2875.941 | 20.400 | 40.122 | 28289.2 |
+
+读取阶段：
+
+| 版本 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| pre (`a388859^`, 4MB) | 32.279 | 3706.248 | 11.613 | 21.417 | 13617.2 |
+| io_uring (`a388859`) | 34.021 | 3445.480 | 22.517 | 11.520 | 84175.6 |
+| current (`pwritev`, 4MB) | 42.745 | 2744.012 | 27.559 | 15.206 | 37380.4 |
+
+结论（默认口径）：
+
+- current 与 io_uring 在写入 wall/吞吐几乎持平，但 current 的 `user/sys/RSS` 明显更低（尤其 RSS）。
+- pre 写入吞吐显著落后，说明“去消息级控制面”并不意味着回到旧阻塞写性能。
+- 读取阶段 current(4MB) 落后，核心原因不是 writer 是否 io_uring，而是 chunk 粒度与解析路径匹配问题（见 19.3/19.4）。
+
+### 19.3 控制变量：统一 `chunk_raw_size=256KB` 后再比
+
+写入阶段（round-robin 10 次均值）：
+
+| 版本 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| pre (`a388859^`, 256KB) | 146.235 | 801.565 | 22.620 | 35.591 | 10880.0 |
+| io_uring (`a388859`) | 40.082 | 2930.589 | 43.660 | 52.575 | 80455.6 |
+| current (`pwritev`, 256KB) | 34.068 | 3459.615 | 19.334 | 33.348 | 10880.0 |
+
+读取阶段（round-robin 10 次均值）：
+
+| 版本 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| pre (`a388859^`, 256KB) | 28.767 | 4270.930 | 14.183 | 14.732 | 10880.0 |
+| io_uring (`a388859`) | 34.329 | 3415.408 | 22.106 | 12.239 | 80455.6 |
+| current (`pwritev`, 256KB) | 34.052 | 3441.998 | 22.394 | 11.677 | 25695.6 |
+
+结论（控参口径）：
+
+- current(256KB) 相比 io_uring：写入 `wall` 更短、吞吐更高，且 `user/sys/RSS` 全面更低。
+- current 与 io_uring 的读取几乎持平，说明“current 读慢”不是架构硬伤，而是默认 chunk 配置影响。
+- pre 的写入依旧明显慢，证明当前收益来自写侧架构与数据面实现，而非单纯 chunk 调参。
+
+### 19.4 真实瓶颈定位（写侧 sys 为什么高）
+
+- 已确认**不是单看 syscall 次数**的问题，而是“每次 flush 的临界区时长 + 线程等待时长”：
+  - 4MB chunk：`pwritev` 次数更少，但单次更慢；chunk 边界等待更长，`futex` 单次耗时上升。
+  - 1MB/512KB chunk：单次 flush 更短，生产者在边界等待更轻，写入 wall/sys 更低。
+- 在 current 实现上做 chunk sweep（8 次均值）：
+  - 写入吞吐最优出现在 **1MB**（约 `3684.9 MiB/s`）
+  - 读取吞吐最优接近 **256KB~1MB** 区间（4MB 明显最差）
+
+### 19.5 阶段建议
+
+- 写侧架构保持 current（`chunk 级双缓冲 + pwritev + prealloc + no fdatasync`），不建议回到消息级 io_uring 控制面。
+- 默认 chunk 建议从 4MB 下调到 **1MB（性能优先）** 或 **512KB（读写折中）**，并按真实 workload 再做一次回归确认。
+
+## 20. 2026-06-28 与 d9597314（zero-copy 时代）对比
+
+### 20.1 对比口径
+
+- 基线：`d95973142438f8379275519a56b99747115bc489`
+- 当前：current `chunk 级双缓冲 + pwritev` 主线实现
+- 统一负载：`record_io_perf 30000 4096`
+- 统一 chunk：`chunk_raw_size=1MB`
+- current 统一开启：
+  - `WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES=256MB`
+  - `WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES=0`
+- 采样方式：10 次交叉采样（interleaved mean）
+
+### 20.2 结果
+
+| 版本 | write wall (ms) | write tp (MiB/s) | write sys (ms) | read wall (ms) | read tp (MiB/s) | read sys (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| d959 | 142.587 | 821.991 | 32.672 | 35.403 | 3511.266 | 16.438 |
+| current | 32.251 | 3680.631 | 32.649 | 24.665 | 4753.529 | 11.475 |
+| 变化 | -77.38% | +347.77% | -0.07% | -30.33% | +35.38% | -30.19% |
+
+### 20.3 解释
+
+- 读写两侧都显著优于 d959，且写侧 `sys` 基本持平，说明 current 的收益主要来自控制面简化与 chunk 级落盘，而不是把 sys 从一个位置搬到另一个位置。
+- 之前“读性能出入”的根因是 chunk 粒度不一致：在 4MB 口径下，当前实现的读侧优势会被放大/缩小得不稳定；用 1MB 统一口径后，current 的读写提升是稳定且可复现的。
+- 4MB 仅作为敏感性参考，不应作为最终 baseline 口径。
+
+## 21. 2026-06-28 真实 replay 复测（current vs baseline/uring_stream）
+
+### 21.1 说明
+
+- 本节是 `record_perf_reader` 的真实 record 复测，文件为 `/mnt/synology/apollo/sensor_rgb.record`。
+- 这里的 `uring_hysteresis` 才是目标 replay 架构；`d9597314` 这版没有同名/同结构 benchmark，因此不存在严格同口径的 d959 replay 数值。
+- 下表用于校准当前真实性能，不要和第 20 节的 synthetic `record_io_perf` 混用。
+
+### 21.2 结果（baseline/uring_stream 单次；uring_hysteresis 为 3 次均值）
+
+| mode | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| baseline_pread | 70469.4 | 103.215 | 1016.40 | 10676.00 | 3909484 |
+| uring_stream | 59085.9 | 123.101 | 1123.93 | 6647.84 | 439360 |
+| uring_hysteresis_avg3 | 34740.5 | 310.508 | 1311.82 | 4451.39 | 448600 |
+
+### 21.3 结论
+
+- `uring_hysteresis` 相比 `baseline_pread`：wall 下降约 50.7%，吞吐提升约 3.0x，sys 下降约 58.3%。
+- `uring_hysteresis` 相比 `uring_stream`：wall 下降约 41.2%，吞吐提升约 2.5x，sys 下降约 33.1%。
+- RSS 从 GiB 级压到约 440MB 级，说明水库队列 + 滞回控制把内存上限控制住了。
+
+## 22. 2026-06-28 最终对比口径（提交前留档）
+
+### 22.1 写实现对比方法（current vs 原始 baseline）
+
+- baseline 提交：`a6730c34e75765f0f052e14e04866cd1198dd16b`
+- 统一基准：`record_io_perf 30000 4096 1048576`
+- current 环境：
+  - `WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES=256MB`
+  - `WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES=0`
+- 采样方式：12 次交叉采样（baseline 与 current 轮转）
+
+结果（12 次均值）：
+
+| 实现 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| baseline (a6730) | 145.331 | 806.639 | 19.221 | 37.123 | 10720 |
+| current | 34.636 | 3440.886 | 9.135 | 35.210 | 10720 |
+
+变化（current 相对 baseline）：
+
+- wall: **-76.17%**
+- throughput: **+326.57%**
+- user: **-52.48%**
+- sys: **-5.15%**
+- RSS: **0%**
+
+### 22.2 读实现对比方法（无 PublisherClock / 无 replay_rate 限速 / 尽快 drain）
+
+- baseline：原始 `RecordFileReader` 路径（`read + CodedInputStream + ParseFromCodedStream`），通过独立 `record_reader_drain_perf` 程序扫描同一真实 record。
+- current：`record_perf_reader --mode=uring_stream`（无节拍发布限制，纯 drain）。
+- 数据文件：`/mnt/synology/apollo/sensor_rgb.record`
+- 为减小冷缓存噪声：先各跑 1 次预热，再做 5 次交叉采样。
+
+结果（预热后 5 次均值）：
+
+| 实现 | wall (ms) | throughput (MiB/s) | user (ms) | sys (ms) | RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| baseline reader | 4343.864 | 1674.528 | 694.378 | 3648.900 | 428032.0 |
+| current uring_stream | 1210.410 | 6009.280 | 952.583 | 1196.418 | 439201.6 |
+
+变化（current 相对 baseline）：
+
+- wall: **-72.14%**
+- throughput: **+258.86%**
+- user: **+37.19%**
+- sys: **-67.21%**
+- RSS: **+2.61%**

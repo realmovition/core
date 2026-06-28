@@ -222,6 +222,38 @@ TEST(RecordFileTest, TestOneChunkFile) {
   ASSERT_FALSE(remove(kTestFile1));
 }
 
+TEST(RecordFileTest, TestChunkRawSizeRespected) {
+  RecordFileWriter rfw;
+
+  ASSERT_TRUE(rfw.Open(kTestFile1));
+  Header header = HeaderBuilder::GetHeaderWithChunkParams(0, 8 * 1024 * 1024);
+  header.set_segment_interval(0);
+  header.set_segment_raw_size(0);
+  ASSERT_TRUE(rfw.WriteHeader(header));
+
+  Channel chan1;
+  chan1.set_name(kChan1);
+  chan1.set_message_type(kMsgType);
+  chan1.set_proto_desc(kStr10B);
+  ASSERT_TRUE(rfw.WriteChannel(chan1));
+
+  const std::string payload(64 * 1024, 'x');
+  for (int i = 0; i < 80; ++i) {
+    SingleMessage message;
+    message.set_channel_name(chan1.name());
+    message.set_content(payload);
+    message.set_time(i + 1);
+    ASSERT_TRUE(rfw.WriteMessage(message));
+  }
+
+  rfw.Close();
+  ASSERT_TRUE(rfw.GetHeader().is_complete());
+  ASSERT_EQ(1, rfw.GetHeader().chunk_number());
+  ASSERT_EQ(80, rfw.GetHeader().message_number());
+
+  ASSERT_FALSE(remove(kTestFile1));
+}
+
 TEST(RecordFileTest, TestIndex) {
   {
     RecordFileWriter* rfw = new RecordFileWriter();

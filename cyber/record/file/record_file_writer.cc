@@ -20,14 +20,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include <algorithm>
-#include <chrono>
+#include <array>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <utility>
+#include <vector>
 
 #include "cyber/common/file.h"
-#include "cyber/task/task.h"
 
 namespace apollo {
 namespace cyber {
@@ -43,27 +44,6 @@ using apollo::cyber::proto::SectionType;
 using apollo::cyber::proto::SingleIndex;
 
 namespace {
-constexpr int kInvalidSlot = -1;
-constexpr int kSpinningIterations = 256;
-
-size_t RoundPayloadCapacity(size_t payload_size) {
-  if (payload_size <= 256) {
-    return 256;
-  }
-  if (payload_size <= 4 * 1024) {
-    return 4 * 1024;
-  }
-  if (payload_size <= 64 * 1024) {
-    return 64 * 1024;
-  }
-  if (payload_size <= 1024 * 1024) {
-    return 1024 * 1024;
-  }
-  if (payload_size <= 4 * 1024 * 1024) {
-    return 4 * 1024 * 1024;
-  }
-  return payload_size;
-}
 
 size_t VarintSize(uint64_t value) {
   size_t size = 1;
@@ -85,12 +65,12 @@ size_t EncodeVarint(char* out, uint64_t value) {
 }
 
 void AppendSingleMessageToChunkBody(std::vector<char>* body_bytes,
-                                    const std::string& channel_name, uint64_t time_ns,
-                                    const char* payload, size_t payload_size) {
+                                    const std::string& channel_name,
+                                    uint64_t time_ns, const char* payload,
+                                    size_t payload_size) {
   const size_t channel_size = channel_name.size();
   const size_t single_message_size =
-      1 + VarintSize(channel_size) + channel_size +
-      1 + VarintSize(time_ns) +
+      1 + VarintSize(channel_size) + channel_size + 1 + VarintSize(time_ns) +
       1 + VarintSize(payload_size) + payload_size;
   const size_t chunk_entry_size =
       1 + VarintSize(single_message_size) + single_message_size;
@@ -98,11 +78,9 @@ void AppendSingleMessageToChunkBody(std::vector<char>* body_bytes,
   body_bytes->resize(old_size + chunk_entry_size);
   char* out = body_bytes->data() + old_size;
 
-  // ChunkBody.messages (field 1): length-delimited SingleMessage bytes.
   *out++ = static_cast<char>(0x0A);
   out += EncodeVarint(out, static_cast<uint64_t>(single_message_size));
 
-  // SingleMessage.channel_name (field 1): length-delimited string.
   *out++ = static_cast<char>(0x0A);
   out += EncodeVarint(out, static_cast<uint64_t>(channel_size));
   if (channel_size > 0) {
@@ -110,17 +88,45 @@ void AppendSingleMessageToChunkBody(std::vector<char>* body_bytes,
     out += channel_size;
   }
 
-  // SingleMessage.time (field 2): uint64 varint.
   *out++ = static_cast<char>(0x10);
   out += EncodeVarint(out, time_ns);
 
-  // SingleMessage.content (field 3): length-delimited bytes.
   *out++ = static_cast<char>(0x1A);
   out += EncodeVarint(out, static_cast<uint64_t>(payload_size));
   if (payload_size > 0) {
     memcpy(out, payload, payload_size);
-    out += payload_size;
   }
+}
+
+uint64_t ParseUint64Env(const char* name, uint64_t fallback) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || raw[0] == '\0') {
+    return fallback;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const unsigned long long parsed = std::strtoull(raw, &end, 10);
+  if (errno != 0 || end == raw || (end != nullptr && *end != '\0')) {
+    AWARN << "Invalid value for env " << name << ": " << raw
+          << ", fallback to " << fallback;
+    return fallback;
+  }
+  return static_cast<uint64_t>(parsed);
+}
+
+uint64_t RoundUpTo(uint64_t value, uint64_t step) {
+  if (step == 0) {
+    return value;
+  }
+  const uint64_t rem = value % step;
+  if (rem == 0) {
+    return value;
+  }
+  const uint64_t add = step - rem;
+  if (value > std::numeric_limits<uint64_t>::max() - add) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return value + add;
 }
 
 }  // namespace
@@ -140,9 +146,10 @@ void Chunk::add(const proto::SingleMessage& message) {
       message.content().size());
 }
 
-void Chunk::add(const std::string& channel_name, uint64_t time_ns, const char* payload,
-                size_t payload_size) {
-  AppendSingleMessageToChunkBody(&body_bytes_, channel_name, time_ns, payload, payload_size);
+void Chunk::add(const std::string& channel_name, uint64_t time_ns,
+                const char* payload, size_t payload_size) {
+  AppendSingleMessageToChunkBody(&body_bytes_, channel_name, time_ns, payload,
+                                 payload_size);
   if (header_.begin_time() == 0 || header_.begin_time() > time_ns) {
     header_.set_begin_time(time_ns);
   }
@@ -155,180 +162,71 @@ void Chunk::add(const std::string& channel_name, uint64_t time_ns, const char* p
 
 bool Chunk::empty() const { return header_.message_number() == 0; }
 
-bool RecordFileWriter::MessageSlot::Store(const proto::SingleMessage& message) {
-  channel_name = message.channel_name();
-  time_ns = message.time();
-  payload_size = message.content().size();
-  if (payload_size <= inline_payload.size()) {
-    use_inline_payload = true;
-    payload_capacity = inline_payload.size();
-    if (payload_size > 0) {
-      memcpy(inline_payload.data(), message.content().data(), payload_size);
-    }
-    return true;
-  }
-  use_inline_payload = false;
-  const size_t target_capacity = RoundPayloadCapacity(payload_size);
-  if (!heap_payload || payload_capacity < target_capacity) {
-    heap_payload.reset(new (std::nothrow) char[target_capacity]);
-    if (!heap_payload) {
-      return false;
-    }
-    payload_capacity = target_capacity;
-  }
-  memcpy(heap_payload.get(), message.content().data(), payload_size);
-  return true;
-}
-
-bool RecordFileWriter::SlotPool::Init(size_t capacity) {
-  slots_.resize(capacity);
-  if (slots_.empty()) {
-    return false;
-  }
-  for (int i = static_cast<int>(slots_.size()) - 1; i >= 0; --i) {
-    slots_[i].next_free = (i == static_cast<int>(slots_.size()) - 1) ? -1 : i + 1;
-  }
-  free_head_.store(0, std::memory_order_release);
-  return true;
-}
-
-int RecordFileWriter::SlotPool::Acquire() {
-  int head = free_head_.load(std::memory_order_acquire);
-  while (head != -1) {
-    const int next = slots_[head].next_free;
-    if (free_head_.compare_exchange_weak(head, next, std::memory_order_acq_rel,
-                                         std::memory_order_acquire)) {
-      return head;
-    }
-  }
-  return -1;
-}
-
-void RecordFileWriter::SlotPool::Release(int index) {
-  if (index < 0 || index >= static_cast<int>(slots_.size())) {
-    return;
-  }
-  int head = free_head_.load(std::memory_order_acquire);
-  do {
-    slots_[index].next_free = head;
-  } while (!free_head_.compare_exchange_weak(head, index, std::memory_order_acq_rel,
-                                             std::memory_order_acquire));
-}
-
-RecordFileWriter::MessageSlot* RecordFileWriter::SlotPool::At(int index) {
-  if (index < 0 || index >= static_cast<int>(slots_.size())) {
-    return nullptr;
-  }
-  return &slots_[index];
-}
-
-bool RecordFileWriter::BoundedMpscRing::Init(size_t capacity) {
-  if (capacity == 0 || (capacity & (capacity - 1)) != 0) {
-    return false;
-  }
-  capacity_ = capacity;
-  mask_ = capacity - 1;
-  data_.reset(new std::atomic<int>[capacity_]);
-  for (size_t i = 0; i < capacity_; ++i) {
-    data_[i].store(kInvalidSlot, std::memory_order_relaxed);
-  }
-  head_.store(0, std::memory_order_release);
-  tail_.store(0, std::memory_order_release);
-  return true;
-}
-
-bool RecordFileWriter::BoundedMpscRing::Push(int slot_index) {
-  while (true) {
-    uint64_t tail = tail_.load(std::memory_order_relaxed);
-    const uint64_t head = head_.load(std::memory_order_acquire);
-    if (tail - head >= capacity_) {
-      return false;
-    }
-    if (!tail_.compare_exchange_weak(tail, tail + 1, std::memory_order_acq_rel,
-                                     std::memory_order_relaxed)) {
-      continue;
-    }
-    std::atomic<int>& cell = data_[tail & mask_];
-    int expected = kInvalidSlot;
-    int spin = 0;
-    while (!cell.compare_exchange_weak(expected, slot_index, std::memory_order_release,
-                                       std::memory_order_relaxed)) {
-      expected = kInvalidSlot;
-      if (++spin >= kSpinningIterations) {
-        apollo::cyber::Yield();
-        spin = 0;
-      }
-    }
-    return true;
-  }
-}
-
-bool RecordFileWriter::BoundedMpscRing::Pop(int* slot_index) {
-  const uint64_t head = head_.load(std::memory_order_relaxed);
-  const uint64_t tail = tail_.load(std::memory_order_acquire);
-  if (head >= tail) {
-    return false;
-  }
-
-  std::atomic<int>& cell = data_[head & mask_];
-  int value = cell.load(std::memory_order_acquire);
-  int spin = 0;
-  while (value == kInvalidSlot) {
-    if (++spin >= kSpinningIterations) {
-      apollo::cyber::Yield();
-      spin = 0;
-    }
-    value = cell.load(std::memory_order_acquire);
-  }
-  cell.store(kInvalidSlot, std::memory_order_release);
-  head_.store(head + 1, std::memory_order_release);
-  *slot_index = value;
-  return true;
-}
-
-bool RecordFileWriter::BoundedMpscRing::Empty() const {
-  return head_.load(std::memory_order_acquire) >=
-         tail_.load(std::memory_order_acquire);
-}
-
 RecordFileWriter::RecordFileWriter() = default;
 
 RecordFileWriter::~RecordFileWriter() { Close(); }
 
-bool RecordFileWriter::InitIoUring() {
-  if (io_uring_queue_init(kRingDepth, &ring_, 0) < 0) {
-    AERROR << "io_uring_queue_init failed, file: " << path_;
+void RecordFileWriter::LoadRuntimeTuningFromEnv() {
+  prealloc_step_bytes_ = ParseUint64Env(
+      "WHEELOS_RECORD_WRITER_PREALLOC_STEP_BYTES", kDefaultPreallocStepBytes);
+  fdatasync_interval_bytes_ = ParseUint64Env(
+      "WHEELOS_RECORD_WRITER_FDATASYNC_INTERVAL_BYTES", 0);
+}
+
+bool RecordFileWriter::EnsureFilePreallocatedLocked(uint64_t required_size_bytes) {
+  if (prealloc_step_bytes_ == 0 || !prealloc_supported_) {
+    return true;
+  }
+  if (required_size_bytes <= preallocated_size_bytes_) {
+    return true;
+  }
+  const uint64_t target_size = RoundUpTo(required_size_bytes, prealloc_step_bytes_);
+  if (target_size < required_size_bytes) {
+    AERROR << "File preallocation size overflow, required: " << required_size_bytes
+           << ", step: " << prealloc_step_bytes_;
     return false;
   }
-  ring_initialized_ = true;
-  ring_fixed_file_registered_ = false;
-  ring_fixed_buffers_registered_ = false;
-  io_failed_ = false;
-  in_flight_io_ = 0;
-  pending_submit_count_ = 0;
-
-  int fixed_fd = fd_;
-  if (io_uring_register_files(&ring_, &fixed_fd, 1) == 0) {
-    ring_fixed_file_registered_ = true;
-  } else {
-    AWARN << "io_uring_register_files failed, fallback to normal fd mode.";
+  const uint64_t alloc_len = target_size - preallocated_size_bytes_;
+  int rc = 0;
+  do {
+    rc = posix_fallocate(fd_, static_cast<off_t>(preallocated_size_bytes_),
+                         static_cast<off_t>(alloc_len));
+  } while (rc == EINTR);
+  if (rc == 0) {
+    preallocated_size_bytes_ = target_size;
+    return true;
   }
-
-  registered_iovecs_.clear();
-  if (!chunk_buffers_.empty()) {
-    registered_iovecs_.resize(chunk_buffers_.size());
-    for (size_t i = 0; i < chunk_buffers_.size(); ++i) {
-      registered_iovecs_[i].iov_base = chunk_buffers_[i].storage.data();
-      registered_iovecs_[i].iov_len = chunk_buffers_[i].storage.size();
+  if (rc == EOPNOTSUPP || rc == ENOTSUP || rc == ENOSYS || rc == EINVAL) {
+    prealloc_supported_ = false;
+    if (!prealloc_warned_) {
+      AWARN << "posix_fallocate unsupported for file " << path_
+            << ", fallback to sparse growth.";
+      prealloc_warned_ = true;
     }
-    if (io_uring_register_buffers(&ring_, registered_iovecs_.data(),
-                                  static_cast<unsigned int>(registered_iovecs_.size())) == 0) {
-      ring_fixed_buffers_registered_ = true;
-    } else {
-      registered_iovecs_.clear();
-      AWARN << "io_uring_register_buffers failed, fallback to normal writev.";
-    }
+    return true;
   }
+  AERROR << "posix_fallocate failed, file: " << path_ << ", rc: " << rc;
+  return false;
+}
+
+bool RecordFileWriter::MaybeDataSyncLocked(bool force) {
+  if (fdatasync_interval_bytes_ == 0) {
+    return true;
+  }
+  if (unsynced_bytes_ == 0) {
+    return true;
+  }
+  if (!force && unsynced_bytes_ < fdatasync_interval_bytes_) {
+    return true;
+  }
+  while (fdatasync(fd_) < 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    AERROR << "fdatasync failed, file: " << path_ << ", errno: " << errno;
+    return false;
+  }
+  unsynced_bytes_ = 0;
   return true;
 }
 
@@ -346,319 +244,150 @@ bool RecordFileWriter::Open(const std::string& path) {
     return false;
   }
 
-  if (!slot_pool_.Init(kQueueCapacity) || !queue_.Init(kQueueCapacity)) {
-    AERROR << "Init writer queue/pool failed.";
-    close(fd_);
-    fd_ = -1;
-    return false;
+  LoadRuntimeTuningFromEnv();
+  preallocated_size_bytes_ = 0;
+  unsynced_bytes_ = 0;
+  prealloc_supported_ = true;
+  prealloc_warned_ = false;
+
+  header_.Clear();
+  index_.Clear();
+  logical_position_ = 0;
+  chunk_interval_ns_ = 0;
+  chunk_raw_size_bytes_ = 0;
+  io_failed_.store(false, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> channel_lock(channel_map_mutex_);
+    channel_message_number_map_.clear();
+  }
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    active_chunk_.reset(new (std::nothrow) Chunk());
+    flush_chunk_.reset(new (std::nothrow) Chunk());
+    if (active_chunk_ == nullptr || flush_chunk_ == nullptr) {
+      AERROR << "Allocate chunk buffers failed.";
+      close(fd_);
+      fd_ = -1;
+      active_chunk_.reset();
+      flush_chunk_.reset();
+      return false;
+    }
+    active_chunk_->body_bytes_.reserve(kInitialBodyReserveBytes);
+    flush_chunk_->body_bytes_.reserve(kInitialBodyReserveBytes);
+    flush_pending_ = false;
   }
 
-  logical_position_ = 0;
-  next_disk_offset_ = 0;
-  chunk_active_.clear();
-  InitChunkBuffers();
-  if (!InitIoUring()) {
-    close(fd_);
-    fd_ = -1;
-    return false;
-  }
-  batch_message_count_ = 0;
-  batch_payload_bytes_ = 0;
-  batch_open_ = false;
-  dropped_frames_.store(0, std::memory_order_release);
-  dropped_bytes_.store(0, std::memory_order_release);
-  dropped_since_alert_.store(0, std::memory_order_release);
   is_writing_.store(true, std::memory_order_release);
   backend_thread_ = std::thread([this]() { BackendLoop(); });
   return true;
 }
 
-void RecordFileWriter::InitChunkBuffers() {
-  chunk_buffers_.clear();
-  chunk_buffers_.resize(kChunkBufferCount);
-  for (auto& buffer : chunk_buffers_) {
-    buffer.storage.resize(kChunkBufferSize);
-    buffer.used = 0;
-    buffer.message_number = 0;
-    buffer.header.Clear();
-    buffer.state = ChunkWriteBuffer::State::FREE;
-  }
-}
-
-void RecordFileWriter::ResetChunkBuffers() {
-  for (auto& buffer : chunk_buffers_) {
-    buffer.used = 0;
-    buffer.message_number = 0;
-    buffer.header.Clear();
-    buffer.state = ChunkWriteBuffer::State::FREE;
-  }
-}
-
-void RecordFileWriter::SubmitBatchIfNeeded(bool force_submit) {
-  if (!ring_initialized_) {
-    return;
-  }
-  if (!force_submit && pending_submit_count_ < kSubmitBatch) {
-    return;
-  }
-  if (pending_submit_count_ <= 0) {
-    return;
-  }
-  if (io_uring_submit(&ring_) < 0) {
-    io_failed_ = true;
-    AERROR << "io_uring_submit failed, file: " << path_;
-  }
-  pending_submit_count_ = 0;
-}
-
-bool RecordFileWriter::PollCompletions(bool wait_for_one, bool* completed) {
-  *completed = false;
-  if (!ring_initialized_) {
+bool RecordFileWriter::WriteBuffers(const struct iovec* iov, int iovcnt,
+                                    size_t expected, uint64_t offset) {
+  if (!EnsureFilePreallocatedLocked(offset + expected)) {
     return false;
   }
-  struct io_uring_cqe* cqe = nullptr;
-  if (wait_for_one && in_flight_io_ > 0) {
-    SubmitBatchIfNeeded(true);
-    if (io_uring_wait_cqe(&ring_, &cqe) < 0 || cqe == nullptr) {
-      io_failed_ = true;
-      AERROR << "io_uring_wait_cqe failed, file: " << path_;
-      return false;
-    }
-  }
-  while (true) {
-    if (cqe == nullptr && io_uring_peek_cqe(&ring_, &cqe) != 0) {
-      break;
-    }
-    *completed = true;
-    auto* request =
-        reinterpret_cast<std::unique_ptr<InflightWrite>*>(io_uring_cqe_get_data(cqe));
-    const int res = cqe->res;
-    if (request != nullptr) {
-      const int chunk_buffer_index = (*request)->chunk_buffer_index;
-      const size_t expected = (*request)->expected;
-      if (res < 0 || static_cast<size_t>(res) != expected) {
-        io_failed_ = true;
-        AERROR << "io_uring completion failed, file: " << path_
-               << ", expect: " << expected << ", res: " << res;
+  std::vector<struct iovec> pending(iov, iov + iovcnt);
+  size_t written_total = 0;
+  while (written_total < expected) {
+    const ssize_t written =
+        pwritev(fd_, pending.data(), static_cast<int>(pending.size()),
+                static_cast<off_t>(offset + written_total));
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
       }
-      if (chunk_buffer_index >= 0 &&
-          chunk_buffer_index < static_cast<int>(chunk_buffers_.size())) {
-        auto& buffer = chunk_buffers_[chunk_buffer_index];
-        buffer.state = ChunkWriteBuffer::State::FREE;
-        buffer.used = 0;
-        buffer.message_number = 0;
-        buffer.header.Clear();
+      AERROR << "pwritev failed, file: " << path_ << ", fd: " << fd_
+             << ", errno: " << errno;
+      return false;
+    }
+    if (written == 0) {
+      AERROR << "pwritev wrote zero bytes, file: " << path_ << ", fd: " << fd_
+             << ", expect: " << expected;
+      return false;
+    }
+
+    written_total += static_cast<size_t>(written);
+    size_t advance = static_cast<size_t>(written);
+    while (advance > 0 && !pending.empty()) {
+      if (advance >= pending.front().iov_len) {
+        advance -= pending.front().iov_len;
+        pending.erase(pending.begin());
+      } else {
+        pending.front().iov_base =
+            static_cast<char*>(pending.front().iov_base) + advance;
+        pending.front().iov_len -= advance;
+        advance = 0;
       }
-      delete request;
-    }
-    io_uring_cqe_seen(&ring_, cqe);
-    cqe = nullptr;
-    --in_flight_io_;
-  }
-  return !io_failed_;
-}
-
-bool RecordFileWriter::FlushCompletions() {
-  SubmitBatchIfNeeded(true);
-  while (in_flight_io_ > 0) {
-    bool completed = false;
-    if (!PollCompletions(true, &completed)) {
-      return false;
     }
   }
-  return !io_failed_;
+  unsynced_bytes_ += expected;
+  return MaybeDataSyncLocked(false);
 }
 
-bool RecordFileWriter::SubmitWritev(std::unique_ptr<InflightWrite> request,
-                                    uint64_t offset) {
-  struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-  while (sqe == nullptr) {
-    bool completed = false;
-    if (!PollCompletions(true, &completed)) {
-      return false;
-    }
-    sqe = io_uring_get_sqe(&ring_);
-  }
-  auto* request_holder = new std::unique_ptr<InflightWrite>(std::move(request));
-  const int submit_fd = ring_fixed_file_registered_ ? 0 : fd_;
-  io_uring_prep_writev(sqe, submit_fd, (*request_holder)->iov.data(),
-                       (*request_holder)->iovcnt, offset);
-  if (ring_fixed_file_registered_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  (*request_holder)->op_kind = InflightWrite::OpKind::kWritev;
-  io_uring_sqe_set_data(sqe, request_holder);
-  ++in_flight_io_;
-  ++pending_submit_count_;
-  SubmitBatchIfNeeded(false);
-  return !io_failed_;
-}
-
-bool RecordFileWriter::SubmitWriteFixed(std::unique_ptr<InflightWrite> request,
-                                        uint64_t offset) {
-  struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-  while (sqe == nullptr) {
-    bool completed = false;
-    if (!PollCompletions(true, &completed)) {
-      return false;
-    }
-    sqe = io_uring_get_sqe(&ring_);
-  }
-  auto* request_holder = new std::unique_ptr<InflightWrite>(std::move(request));
-  const int submit_fd = ring_fixed_file_registered_ ? 0 : fd_;
-  auto* fixed_data = chunk_buffers_[(*request_holder)->fixed_buf_index].storage.data();
-  io_uring_prep_write_fixed(sqe, submit_fd, fixed_data,
-                            static_cast<unsigned int>((*request_holder)->fixed_nbytes),
-                            offset, (*request_holder)->fixed_buf_index);
-  if (ring_fixed_file_registered_) {
-    sqe->flags |= IOSQE_FIXED_FILE;
-  }
-  (*request_holder)->op_kind = InflightWrite::OpKind::kWriteFixed;
-  io_uring_sqe_set_data(sqe, request_holder);
-  ++in_flight_io_;
-  ++pending_submit_count_;
-  SubmitBatchIfNeeded(false);
-  return !io_failed_;
-}
-
-bool RecordFileWriter::SubmitHeaderRewrite(const proto::Header& header) {
-  auto request = std::unique_ptr<InflightWrite>(new InflightWrite());
+bool RecordFileWriter::WriteHeaderRewrite(const proto::Header& header) {
   const size_t message_size = header.ByteSizeLong();
   if (message_size > HEADER_LENGTH) {
     AERROR << "Header size exceeds reserved length, size: " << message_size
            << ", max: " << HEADER_LENGTH;
     return false;
   }
-  request->section_a = {proto::SectionType::SECTION_HEADER,
-                        static_cast<int64_t>(message_size)};
-  request->payload_a.resize(message_size);
-  if (!header.SerializeToArray(request->payload_a.data(),
-                               static_cast<int>(request->payload_a.size()))) {
+
+  Section section = {proto::SectionType::SECTION_HEADER,
+                     static_cast<int64_t>(message_size)};
+  std::vector<char> payload(message_size);
+  if (!header.SerializeToArray(payload.data(), static_cast<int>(payload.size()))) {
     AERROR << "Serialize header failed.";
     return false;
   }
-  request->payload_b.assign(HEADER_LENGTH - message_size, '0');
-  request->iov[0].iov_base = &request->section_a;
-  request->iov[0].iov_len = sizeof(Section);
-  request->iov[1].iov_base = request->payload_a.data();
-  request->iov[1].iov_len = request->payload_a.size();
-  request->iov[2].iov_base = request->payload_b.data();
-  request->iov[2].iov_len = request->payload_b.size();
-  request->iovcnt = 3;
-  request->expected = sizeof(Section) + HEADER_LENGTH;
-  return SubmitWritev(std::move(request), 0);
-}
-
-bool RecordFileWriter::WriteSectionRaw(proto::SectionType type,
-                                       std::vector<char>&& payload) {
-  const uint64_t payload_size = static_cast<uint64_t>(payload.size());
-  auto request = std::unique_ptr<InflightWrite>(new InflightWrite());
-  request->section_a = {type, static_cast<int64_t>(payload_size)};
-  request->payload_a = std::move(payload);
-  request->iov[0].iov_base = &request->section_a;
-  request->iov[0].iov_len = sizeof(Section);
-  request->iov[1].iov_base = request->payload_a.data();
-  request->iov[1].iov_len = request->payload_a.size();
-  request->iovcnt = 2;
-  request->expected = sizeof(Section) + request->payload_a.size();
-
-  const uint64_t offset = next_disk_offset_;
-  if (!SubmitWritev(std::move(request), offset)) {
-    return false;
-  }
-  next_disk_offset_ += sizeof(Section) + payload_size;
-  logical_position_ += sizeof(Section) + payload_size;
-  header_.set_size(logical_position_);
-  return true;
-}
-
-bool RecordFileWriter::WriteChunkBodyFromFixedBuffer(int buffer_index) {
-  if (buffer_index < 0 || buffer_index >= static_cast<int>(chunk_buffers_.size())) {
-    return false;
-  }
-  auto& buffer = chunk_buffers_[buffer_index];
-  if (buffer.state != ChunkWriteBuffer::State::FILLING || buffer.used == 0) {
-    return false;
-  }
-
-  const uint64_t offset = next_disk_offset_;
-  auto section_request = std::unique_ptr<InflightWrite>(new InflightWrite());
-  section_request->section_a = {proto::SectionType::SECTION_CHUNK_BODY,
-                                static_cast<int64_t>(buffer.used)};
-  section_request->iov[0].iov_base = &section_request->section_a;
-  section_request->iov[0].iov_len = sizeof(Section);
-  section_request->iovcnt = 1;
-  section_request->expected = sizeof(Section);
-  if (!SubmitWritev(std::move(section_request), offset)) {
-    return false;
-  }
-
-  bool submitted_body = false;
-  if (ring_fixed_buffers_registered_) {
-    auto body_request = std::unique_ptr<InflightWrite>(new InflightWrite());
-    body_request->expected = buffer.used;
-    body_request->chunk_buffer_index = buffer_index;
-    body_request->fixed_nbytes = buffer.used;
-    body_request->fixed_buf_index = buffer_index;
-    if (SubmitWriteFixed(std::move(body_request), offset + sizeof(Section))) {
-      submitted_body = true;
-    } else {
-      io_failed_ = true;
-      return false;
-    }
-  } else {
-    auto body_request = std::unique_ptr<InflightWrite>(new InflightWrite());
-    body_request->iov[0].iov_base = buffer.storage.data();
-    body_request->iov[0].iov_len = buffer.used;
-    body_request->iovcnt = 1;
-    body_request->expected = buffer.used;
-    body_request->chunk_buffer_index = buffer_index;
-    if (SubmitWritev(std::move(body_request), offset + sizeof(Section))) {
-      submitted_body = true;
-    } else {
-      io_failed_ = true;
-      return false;
-    }
-  }
-
-  if (!submitted_body) {
-    return false;
-  }
-  next_disk_offset_ += sizeof(Section) + buffer.used;
-  logical_position_ += sizeof(Section) + buffer.used;
-  header_.set_size(logical_position_);
-  buffer.state = ChunkWriteBuffer::State::SUBMITTED;
-  return true;
-}
-
-int RecordFileWriter::AcquireChunkWriteBufferLocked() {
-  for (int i = 0; i < static_cast<int>(chunk_buffers_.size()); ++i) {
-    auto& buffer = chunk_buffers_[i];
-    if (buffer.state == ChunkWriteBuffer::State::FREE) {
-      buffer.state = ChunkWriteBuffer::State::FILLING;
-      return i;
-    }
-  }
-  return -1;
+  std::vector<char> padding(HEADER_LENGTH - message_size, '0');
+  std::array<struct iovec, 3> iov = {};
+  iov[0].iov_base = &section;
+  iov[0].iov_len = sizeof(Section);
+  iov[1].iov_base = payload.data();
+  iov[1].iov_len = payload.size();
+  iov[2].iov_base = padding.data();
+  iov[2].iov_len = padding.size();
+  return WriteBuffers(iov.data(), static_cast<int>(iov.size()),
+                      sizeof(Section) + HEADER_LENGTH, 0);
 }
 
 bool RecordFileWriter::WriteHeader(const Header& header) {
   std::lock_guard<std::mutex> io_lock(io_mutex_);
   header_ = header;
-  if (!SubmitHeaderRewrite(header_)) {
+  chunk_interval_ns_ = header.chunk_interval();
+  chunk_raw_size_bytes_ = header.chunk_raw_size();
+  if (!WriteHeaderRewrite(header_)) {
     return false;
   }
   if (logical_position_ == 0) {
-    logical_position_ += sizeof(Section) + HEADER_LENGTH;
-    next_disk_offset_ = logical_position_;
+    logical_position_ = sizeof(Section) + HEADER_LENGTH;
     header_.set_size(logical_position_);
   }
   return true;
 }
 
+bool RecordFileWriter::WriteSectionRaw(proto::SectionType type,
+                                       std::vector<char>&& payload) {
+  const uint64_t payload_size = static_cast<uint64_t>(payload.size());
+  Section section = {type, static_cast<int64_t>(payload_size)};
+  std::array<struct iovec, 2> iov = {};
+  iov[0].iov_base = &section;
+  iov[0].iov_len = sizeof(Section);
+  iov[1].iov_base = payload.data();
+  iov[1].iov_len = payload.size();
+  if (!WriteBuffers(iov.data(), static_cast<int>(iov.size()),
+                    sizeof(Section) + payload.size(), logical_position_)) {
+    return false;
+  }
+  logical_position_ += sizeof(Section) + payload_size;
+  header_.set_size(logical_position_);
+  return true;
+}
+
 bool RecordFileWriter::WriteChannel(const Channel& channel) {
   std::lock_guard<std::mutex> io_lock(io_mutex_);
-  uint64_t pos = CurrentPosition();
+  const uint64_t pos = CurrentPosition();
   if (!WriteSection<Channel>(channel)) {
     AERROR << "Write channel section fail";
     return false;
@@ -676,74 +405,115 @@ bool RecordFileWriter::WriteChannel(const Channel& channel) {
   return true;
 }
 
-void RecordFileWriter::HandleDrop(uint64_t payload_bytes) {
-  dropped_frames_.fetch_add(1, std::memory_order_relaxed);
-  dropped_bytes_.fetch_add(payload_bytes, std::memory_order_relaxed);
-  const uint64_t local = dropped_since_alert_.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (local >= kDropAlertEveryFrames) {
-    dropped_since_alert_.store(0, std::memory_order_relaxed);
-    AWARN << "Record queue overflow, dropped "
-          << dropped_frames_.load(std::memory_order_relaxed) << " frames ("
-          << dropped_bytes_.load(std::memory_order_relaxed) << " bytes) in total.";
-  }
-}
-
-bool RecordFileWriter::EnqueueMessage(const proto::SingleMessage& message) {
-  const int slot_index = slot_pool_.Acquire();
-  if (slot_index < 0) {
-    HandleDrop(message.content().size());
+bool RecordFileWriter::RotateActiveChunkLocked(
+    std::unique_lock<std::mutex>* state_lock) {
+  if (active_chunk_ == nullptr || active_chunk_->empty()) {
     return true;
   }
-  MessageSlot* slot = slot_pool_.At(slot_index);
-  if (slot == nullptr) {
-    slot_pool_.Release(slot_index);
-    HandleDrop(message.content().size());
-    return true;
+  while (flush_pending_ && !io_failed_.load(std::memory_order_acquire)) {
+    flush_slot_cv_.wait(*state_lock);
   }
-  if (!slot->Store(message)) {
-    slot_pool_.Release(slot_index);
-    HandleDrop(message.content().size());
-    return true;
+  if (io_failed_.load(std::memory_order_acquire) || flush_chunk_ == nullptr) {
+    return false;
   }
-
-  if (!queue_.Push(slot_index)) {
-    slot_pool_.Release(slot_index);
-    HandleDrop(message.content().size());
-    return true;
-  }
-  {
-    std::lock_guard<std::mutex> lock(queue_wait_mutex_);
-    queue_wait_cv_.notify_one();
-  }
+  std::swap(active_chunk_, flush_chunk_);
+  active_chunk_->clear();
+  flush_pending_ = true;
+  backend_cv_.notify_one();
   return true;
 }
 
 bool RecordFileWriter::WriteMessage(const proto::SingleMessage& message) {
-  if (!is_writing_.load(std::memory_order_acquire) || io_failed_) {
+  if (!is_writing_.load(std::memory_order_acquire) ||
+      io_failed_.load(std::memory_order_acquire)) {
     return false;
   }
+
+  {
+    std::unique_lock<std::mutex> state_lock(state_mutex_);
+    if (active_chunk_ == nullptr) {
+      return false;
+    }
+    active_chunk_->add(message);
+    const bool over_interval =
+        chunk_interval_ns_ > 0 &&
+        message.time() - active_chunk_->header_.begin_time() > chunk_interval_ns_;
+    const bool over_raw_size =
+        chunk_raw_size_bytes_ > 0 &&
+        active_chunk_->header_.raw_size() > chunk_raw_size_bytes_;
+    if ((over_interval || over_raw_size) &&
+        !RotateActiveChunkLocked(&state_lock)) {
+      return false;
+    }
+  }
+
   {
     std::lock_guard<std::mutex> channel_lock(channel_map_mutex_);
     auto it = channel_message_number_map_.find(message.channel_name());
     if (it != channel_message_number_map_.end()) {
       it->second++;
     } else {
-      channel_message_number_map_.insert(std::make_pair(message.channel_name(), 1));
+      channel_message_number_map_.insert(
+          std::make_pair(message.channel_name(), 1));
     }
   }
-  return EnqueueMessage(message);
+  return !io_failed_.load(std::memory_order_acquire);
 }
 
 bool RecordFileWriter::WriteChunk(Chunk* chunk) {
+  if (chunk == nullptr || chunk->empty()) {
+    return true;
+  }
+
   const ChunkHeader& chunk_header = chunk->header_;
-  uint64_t pos = CurrentPosition();
-  if (!WriteSection<ChunkHeader>(chunk_header)) {
-    AERROR << "Write chunk header fail";
+  std::vector<char> chunk_header_payload(chunk_header.ByteSizeLong());
+  if (!chunk_header.SerializeToArray(
+          chunk_header_payload.data(),
+          static_cast<int>(chunk_header_payload.size()))) {
+    AERROR << "Serialize chunk header failed.";
     return false;
   }
+
+  const uint64_t chunk_header_pos = CurrentPosition();
+  const uint64_t chunk_body_pos =
+      chunk_header_pos + sizeof(Section) + chunk_header_payload.size();
+  Section chunk_header_section = {
+      proto::SectionType::SECTION_CHUNK_HEADER,
+      static_cast<int64_t>(chunk_header_payload.size())};
+  Section chunk_body_section = {proto::SectionType::SECTION_CHUNK_BODY,
+                                static_cast<int64_t>(chunk->body_bytes_.size())};
+  std::array<struct iovec, 4> iov = {};
+  iov[0].iov_base = &chunk_header_section;
+  iov[0].iov_len = sizeof(Section);
+  iov[1].iov_base = chunk_header_payload.data();
+  iov[1].iov_len = chunk_header_payload.size();
+  iov[2].iov_base = &chunk_body_section;
+  iov[2].iov_len = sizeof(Section);
+  iov[3].iov_base = chunk->body_bytes_.data();
+  iov[3].iov_len = chunk->body_bytes_.size();
+  const size_t total_bytes = sizeof(Section) + chunk_header_payload.size() +
+                             sizeof(Section) + chunk->body_bytes_.size();
+  if (!WriteBuffers(iov.data(), static_cast<int>(iov.size()), total_bytes,
+                    chunk_header_pos)) {
+    return false;
+  }
+
+  logical_position_ += total_bytes;
+  header_.set_size(logical_position_);
+  header_.set_chunk_number(header_.chunk_number() + 1);
+  if (header_.begin_time() == 0 ||
+      chunk_header.begin_time() < header_.begin_time()) {
+    header_.set_begin_time(chunk_header.begin_time());
+  }
+  if (chunk_header.end_time() > header_.end_time()) {
+    header_.set_end_time(chunk_header.end_time());
+  }
+  header_.set_message_number(header_.message_number() +
+                             chunk_header.message_number());
+
   SingleIndex* single_index = index_.add_indexes();
   single_index->set_type(SectionType::SECTION_CHUNK_HEADER);
-  single_index->set_position(pos);
+  single_index->set_position(chunk_header_pos);
   auto* chunk_header_cache = new ChunkHeaderCache();
   chunk_header_cache->set_begin_time(chunk_header.begin_time());
   chunk_header_cache->set_end_time(chunk_header.end_time());
@@ -751,151 +521,67 @@ bool RecordFileWriter::WriteChunk(Chunk* chunk) {
   chunk_header_cache->set_raw_size(chunk_header.raw_size());
   single_index->set_allocated_chunk_header_cache(chunk_header_cache);
 
-  const int buffer_index = AcquireChunkWriteBufferLocked();
-  pos = CurrentPosition();
-  const size_t body_size = chunk->body_bytes_.size();
-  if (buffer_index >= 0) {
-    auto& write_buffer = chunk_buffers_[buffer_index];
-    if (body_size <= write_buffer.storage.size() &&
-        chunk_buffers_[buffer_index].state == ChunkWriteBuffer::State::FILLING) {
-      if (body_size > 0) {
-        memcpy(write_buffer.storage.data(), chunk->body_bytes_.data(), body_size);
-      }
-      write_buffer.used = body_size;
-      write_buffer.message_number = chunk_header.message_number();
-      write_buffer.header = chunk_header;
-      if (!WriteChunkBodyFromFixedBuffer(buffer_index)) {
-        AERROR << "Write chunk body from fixed buffer fail";
-        write_buffer.state = ChunkWriteBuffer::State::FREE;
-        return false;
-      }
-    } else {
-      write_buffer.state = ChunkWriteBuffer::State::FREE;
-      if (!WriteSectionRaw(SectionType::SECTION_CHUNK_BODY,
-                           std::move(chunk->body_bytes_))) {
-        AERROR << "Write chunk body fallback fail";
-        return false;
-      }
-    }
-  } else {
-    if (!WriteSectionRaw(SectionType::SECTION_CHUNK_BODY,
-                         std::move(chunk->body_bytes_))) {
-      AERROR << "Write chunk body fallback fail";
-      return false;
-    }
-  }
-  header_.set_chunk_number(header_.chunk_number() + 1);
-  if (header_.begin_time() == 0 || chunk_header.begin_time() < header_.begin_time()) {
-    header_.set_begin_time(chunk_header.begin_time());
-  }
-  if (chunk_header.end_time() > header_.end_time()) {
-    header_.set_end_time(chunk_header.end_time());
-  }
-  header_.set_message_number(header_.message_number() + chunk_header.message_number());
   single_index = index_.add_indexes();
   single_index->set_type(SectionType::SECTION_CHUNK_BODY);
-  single_index->set_position(pos);
+  single_index->set_position(chunk_body_pos);
   auto* chunk_body_cache = new ChunkBodyCache();
   chunk_body_cache->set_message_number(chunk_header.message_number());
   single_index->set_allocated_chunk_body_cache(chunk_body_cache);
   return true;
 }
 
-bool RecordFileWriter::FlushActiveChunk() {
-  std::lock_guard<std::mutex> io_lock(io_mutex_);
-  return FlushActiveChunkLocked();
-}
-
-bool RecordFileWriter::FlushActiveChunkLocked() {
-  if (chunk_active_.empty()) {
-    return true;
-  }
-  if (!WriteChunk(&chunk_active_)) {
-    return false;
-  }
-  chunk_active_.clear();
-  ResetBatchStateLocked();
-  return true;
-}
-
-void RecordFileWriter::ResetBatchStateLocked() {
-  batch_message_count_ = 0;
-  batch_payload_bytes_ = 0;
-  batch_open_ = false;
-}
-
 void RecordFileWriter::BackendLoop() {
-  const auto wait_budget = std::chrono::microseconds(kMaxBatchWaitUs);
+  Chunk local_chunk;
+  local_chunk.body_bytes_.reserve(kInitialBodyReserveBytes);
   while (true) {
-    int slot_index = kInvalidSlot;
-    if (!queue_.Pop(&slot_index)) {
-      if (!is_writing_.load(std::memory_order_acquire) && queue_.Empty()) {
+    {
+      std::unique_lock<std::mutex> state_lock(state_mutex_);
+      backend_cv_.wait(state_lock, [this] {
+        return flush_pending_ || !is_writing_.load(std::memory_order_acquire);
+      });
+      if (!flush_pending_ && !is_writing_.load(std::memory_order_acquire)) {
         break;
       }
-      std::unique_lock<std::mutex> wait_lock(queue_wait_mutex_);
-      queue_wait_cv_.wait_for(wait_lock, wait_budget, [this] {
-        return !queue_.Empty() || !is_writing_.load(std::memory_order_acquire);
-      });
-      wait_lock.unlock();
-      std::lock_guard<std::mutex> io_lock(io_mutex_);
-      if (batch_open_ &&
-          std::chrono::steady_clock::now() - batch_start_time_ >= wait_budget) {
-        if (!FlushActiveChunkLocked()) {
-          io_failed_ = true;
-        }
+      if (flush_chunk_ == nullptr) {
+        io_failed_.store(true, std::memory_order_release);
+        is_writing_.store(false, std::memory_order_release);
+        flush_slot_cv_.notify_all();
+        backend_cv_.notify_all();
+        break;
       }
-      continue;
-    }
-
-    MessageSlot* slot = slot_pool_.At(slot_index);
-    if (slot == nullptr) {
-      continue;
+      std::swap(local_chunk, *flush_chunk_);
+      flush_pending_ = false;
+      flush_slot_cv_.notify_all();
     }
 
     {
       std::lock_guard<std::mutex> io_lock(io_mutex_);
-      const uint64_t message_time = slot->time_ns;
-      const uint64_t message_size = slot->payload_size;
-      if (!batch_open_) {
-        batch_start_time_ = std::chrono::steady_clock::now();
-        batch_open_ = true;
+      if (!WriteChunk(&local_chunk)) {
+        io_failed_.store(true, std::memory_order_release);
       }
-      chunk_active_.add(slot->channel_name, slot->time_ns, slot->PayloadData(),
-                        slot->payload_size);
-      ++batch_message_count_;
-      batch_payload_bytes_ += message_size;
-      const bool over_interval =
-          header_.chunk_interval() > 0 && batch_message_count_ > 0 &&
-          message_time - chunk_active_.header_.begin_time() > header_.chunk_interval();
-      const bool over_raw_size = header_.chunk_raw_size() > 0 &&
-                                 chunk_active_.header_.raw_size() >
-                                     header_.chunk_raw_size();
-      const bool over_batch_msg = batch_message_count_ >= kMaxBatchMsgs;
-      const bool over_batch_bytes = batch_payload_bytes_ >= kMaxBatchBytes;
-      if (over_interval || over_raw_size || over_batch_msg || over_batch_bytes) {
-        if (!FlushActiveChunkLocked()) {
-          io_failed_ = true;
-        }
-      }
-      bool completed = false;
-      PollCompletions(false, &completed);
     }
-    slot->Reset();
-    slot_pool_.Release(slot_index);
-  }
-
-  std::lock_guard<std::mutex> io_lock(io_mutex_);
-  if (!FlushActiveChunkLocked()) {
-    io_failed_ = true;
+    if (io_failed_.load(std::memory_order_acquire)) {
+      is_writing_.store(false, std::memory_order_release);
+      flush_slot_cv_.notify_all();
+      backend_cv_.notify_all();
+      break;
+    }
+    local_chunk.clear();
+    if (local_chunk.body_bytes_.capacity() < kInitialBodyReserveBytes) {
+      local_chunk.body_bytes_.reserve(kInitialBodyReserveBytes);
+    }
   }
 }
 
 bool RecordFileWriter::WriteIndex() {
-  for (int i = 0; i < index_.indexes_size(); i++) {
-    SingleIndex* single_index = index_.mutable_indexes(i);
-    if (single_index->type() == SectionType::SECTION_CHANNEL) {
+  {
+    std::lock_guard<std::mutex> channel_lock(channel_map_mutex_);
+    for (int i = 0; i < index_.indexes_size(); ++i) {
+      SingleIndex* single_index = index_.mutable_indexes(i);
+      if (single_index->type() != SectionType::SECTION_CHANNEL) {
+        continue;
+      }
       ChannelCache* channel_cache = single_index->mutable_channel_cache();
-      std::lock_guard<std::mutex> channel_lock(channel_map_mutex_);
       auto it = channel_message_number_map_.find(channel_cache->name());
       if (it != channel_message_number_map_.end()) {
         channel_cache->set_message_number(it->second);
@@ -911,43 +597,63 @@ bool RecordFileWriter::WriteIndex() {
 }
 
 void RecordFileWriter::Close() {
-  if (!is_writing_.load(std::memory_order_acquire)) {
+  const bool was_writing =
+      is_writing_.exchange(false, std::memory_order_acq_rel);
+  if (!was_writing && fd_ < 0) {
     return;
   }
 
-  is_writing_.store(false, std::memory_order_release);
-  queue_wait_cv_.notify_all();
+  {
+    std::unique_lock<std::mutex> state_lock(state_mutex_);
+    if (!io_failed_.load(std::memory_order_acquire) && active_chunk_ != nullptr &&
+        !active_chunk_->empty()) {
+      while (flush_pending_ && !io_failed_.load(std::memory_order_acquire)) {
+        flush_slot_cv_.wait(state_lock);
+      }
+      if (!io_failed_.load(std::memory_order_acquire) &&
+          flush_chunk_ != nullptr) {
+        std::swap(active_chunk_, flush_chunk_);
+        active_chunk_->clear();
+        flush_pending_ = true;
+      }
+    }
+  }
+  backend_cv_.notify_one();
   if (backend_thread_.joinable()) {
     backend_thread_.join();
   }
 
   {
     std::lock_guard<std::mutex> io_lock(io_mutex_);
-    if (!WriteIndex()) {
-      AERROR << "Write index section failed, file: " << path_;
+    if (!io_failed_.load(std::memory_order_acquire)) {
+      if (!WriteIndex()) {
+        AERROR << "Write index section failed, file: " << path_;
+        io_failed_.store(true, std::memory_order_release);
+      }
     }
-    header_.set_is_complete(true);
-    if (!SubmitHeaderRewrite(header_)) {
-      AERROR << "Overwrite header section failed, file: " << path_;
+    if (!io_failed_.load(std::memory_order_acquire)) {
+      header_.set_is_complete(true);
+      if (!WriteHeaderRewrite(header_)) {
+        AERROR << "Overwrite header section failed, file: " << path_;
+        io_failed_.store(true, std::memory_order_release);
+      }
     }
-    if (!FlushCompletions()) {
-      AERROR << "Flush io_uring completions failed, file: " << path_;
+    if (!io_failed_.load(std::memory_order_acquire)) {
+      if (ftruncate(fd_, static_cast<off_t>(logical_position_)) < 0) {
+        AERROR << "ftruncate failed, file: " << path_
+               << ", logical size: " << logical_position_
+               << ", errno: " << errno;
+        io_failed_.store(true, std::memory_order_release);
+      } else {
+        preallocated_size_bytes_ = logical_position_;
+      }
+    }
+    if (!io_failed_.load(std::memory_order_acquire) &&
+        !MaybeDataSyncLocked(true)) {
+      io_failed_.store(true, std::memory_order_release);
     }
   }
 
-  if (ring_initialized_) {
-    if (ring_fixed_buffers_registered_) {
-      io_uring_unregister_buffers(&ring_);
-      ring_fixed_buffers_registered_ = false;
-    }
-    registered_iovecs_.clear();
-    if (ring_fixed_file_registered_) {
-      io_uring_unregister_files(&ring_);
-      ring_fixed_file_registered_ = false;
-    }
-    io_uring_queue_exit(&ring_);
-    ring_initialized_ = false;
-  }
   if (fd_ >= 0) {
     if (close(fd_) < 0) {
       AERROR << "Close file failed, file: " << path_ << ", fd: " << fd_
@@ -955,10 +661,17 @@ void RecordFileWriter::Close() {
     }
     fd_ = -1;
   }
-  ResetChunkBuffers();
+
+  {
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    active_chunk_.reset();
+    flush_chunk_.reset();
+    flush_pending_ = false;
+  }
 }
 
-uint64_t RecordFileWriter::GetMessageNumber(const std::string& channel_name) const {
+uint64_t RecordFileWriter::GetMessageNumber(
+    const std::string& channel_name) const {
   std::lock_guard<std::mutex> channel_lock(channel_map_mutex_);
   auto search = channel_message_number_map_.find(channel_name);
   if (search != channel_message_number_map_.end()) {

@@ -114,7 +114,8 @@ PerfResult DiffResult(const UsageSnapshot& before, const UsageSnapshot& after,
 }
 
 bool WriteRecordFile(const std::string& path, int message_count,
-                     int payload_size_bytes, PerfResult* result) {
+                     int payload_size_bytes, int chunk_raw_size_bytes,
+                     PerfResult* result) {
   RecordFileWriter writer;
   if (!writer.Open(path)) {
     std::cerr << "write_open_failed path=" << path << " errno=" << errno << "\n";
@@ -125,7 +126,7 @@ bool WriteRecordFile(const std::string& path, int message_count,
   header.set_segment_interval(0);
   header.set_segment_raw_size(0);
   header.set_chunk_interval(0);
-  header.set_chunk_raw_size(4 * 1024 * 1024);
+  header.set_chunk_raw_size(chunk_raw_size_bytes);
   if (!writer.WriteHeader(header)) {
     std::cerr << "write_header_failed\n";
     return false;
@@ -229,11 +230,13 @@ bool ReadRecordFile(const std::string& path, PerfResult* result) {
 }
 
 std::string ToJson(const PerfResult& write_result, const PerfResult& read_result,
-                   int message_count, int payload_size_bytes) {
+                   int message_count, int payload_size_bytes,
+                   int chunk_raw_size_bytes) {
   std::ostringstream output;
   output << "{";
   output << "\"message_count\":" << message_count << ",";
   output << "\"payload_size_bytes\":" << payload_size_bytes << ",";
+  output << "\"chunk_raw_size_bytes\":" << chunk_raw_size_bytes << ",";
   output << "\"total_payload_bytes\":"
          << (static_cast<uint64_t>(message_count) * payload_size_bytes) << ",";
   output << "\"write\":{"
@@ -267,25 +270,32 @@ std::string ToJson(const PerfResult& write_result, const PerfResult& read_result
 int main(int argc, char** argv) {
   int message_count = 20000;
   int payload_size_bytes = 4096;
+  int chunk_raw_size_bytes = 4 * 1024 * 1024;
   if (argc > 1) {
     message_count = std::max(1, std::atoi(argv[1]));
   }
   if (argc > 2) {
     payload_size_bytes = std::max(64, std::atoi(argv[2]));
   }
+  if (argc > 3) {
+    chunk_raw_size_bytes = std::max(64 * 1024, std::atoi(argv[3]));
+  }
 
   const std::string path = "record_io_perf.record";
   apollo::cyber::record::PerfResult write_result;
   apollo::cyber::record::PerfResult read_result;
   if (!apollo::cyber::record::WriteRecordFile(path, message_count,
-                                              payload_size_bytes, &write_result)) {
+                                               payload_size_bytes,
+                                               chunk_raw_size_bytes,
+                                               &write_result)) {
     return 1;
   }
   if (!apollo::cyber::record::ReadRecordFile(path, &read_result)) {
     return 1;
   }
   std::cout << apollo::cyber::record::ToJson(write_result, read_result,
-                                             message_count, payload_size_bytes)
+                                             message_count, payload_size_bytes,
+                                             chunk_raw_size_bytes)
             << "\n";
   apollo::cyber::common::DeleteFile(path);
   return 0;
