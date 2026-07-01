@@ -224,6 +224,7 @@ class PodMessage {
 
   const uint8_t* data() const { return data_; }
   std::size_t size() const { return size_; }
+  bool is_borrowed() const { return data_ != nullptr && buffer_.empty(); }
 
   const PodChunkHeader* header() const {
     if (data_ == nullptr || size_ < sizeof(PodChunkHeader)) {

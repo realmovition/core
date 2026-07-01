@@ -40,7 +40,7 @@ void ShmDispatcher::Shutdown() {
   }
 
   {
-    ReadLockGuard<AtomicRWLock> lock(segments_lock_);
+    WriteLockGuard<AtomicRWLock> lock(segments_lock_);
     for (const auto& item : segments_) {
       AINFO << "shm segment pressure for channel["
             << common::GlobalData::GetChannelById(item.first)
@@ -61,22 +61,25 @@ void ShmDispatcher::AddSegment(const RoleAttributes& self_attr) {
   previous_indexes_[channel_id] = UINT32_MAX;
 }
 
-void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index) {
+void ShmDispatcher::ReadMessage(uint64_t channel_id, uint32_t block_index,
+                                const SegmentPtr& segment) {
+  if (segment == nullptr) {
+    return;
+  }
   ADEBUG << "Reading sharedmem message: "
          << GlobalData::GetChannelById(channel_id)
          << " from block: " << block_index;
   auto rb = std::make_shared<ReadableBlock>();
   rb->index = block_index;
-  if (!segments_[channel_id]->AcquireBlockToRead(rb.get())) {
+  if (!segment->AcquireBlockToRead(rb.get())) {
     AWARN << "fail to acquire block, channel: "
           << GlobalData::GetChannelById(channel_id)
           << " index: " << block_index;
     return;
   }
-  auto segment = segments_[channel_id];
   ReadableBlock readable_block = *rb;
-  rb->release_guard = std::shared_ptr<void>(
-      nullptr, [segment, readable_block](void*) {
+  rb->release_guard =
+      std::shared_ptr<void>(nullptr, [segment, readable_block](void*) {
         segment->ReleaseReadBlock(readable_block);
       });
 
@@ -125,15 +128,15 @@ void ShmDispatcher::ThreadFunc() {
     uint64_t channel_id = readable_info.channel_id();
     uint32_t block_index = readable_info.block_index();
 
+    SegmentPtr segment = nullptr;
     {
-      ReadLockGuard<AtomicRWLock> lock(segments_lock_);
-      if (segments_.count(channel_id) == 0) {
+      WriteLockGuard<AtomicRWLock> lock(segments_lock_);
+      auto segment_it = segments_.find(channel_id);
+      if (segment_it == segments_.end()) {
         continue;
       }
+      segment = segment_it->second;
       // check block index
-      if (previous_indexes_.count(channel_id) == 0) {
-        previous_indexes_[channel_id] = UINT32_MAX;
-      }
       uint32_t& previous_index = previous_indexes_[channel_id];
       if (block_index != 0 && previous_index != UINT32_MAX) {
         if (block_index == previous_index) {
@@ -148,9 +151,8 @@ void ShmDispatcher::ThreadFunc() {
         }
       }
       previous_index = block_index;
-
-      ReadMessage(channel_id, block_index);
     }
+    ReadMessage(channel_id, block_index, segment);
   }
 }
 

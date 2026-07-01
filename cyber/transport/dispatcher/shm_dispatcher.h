@@ -63,7 +63,8 @@ class ShmDispatcher : public Dispatcher {
 
  private:
   void AddSegment(const RoleAttributes& self_attr);
-  void ReadMessage(uint64_t channel_id, uint32_t block_index);
+  void ReadMessage(uint64_t channel_id, uint32_t block_index,
+                   const SegmentPtr& segment);
   void OnMessage(uint64_t channel_id, const std::shared_ptr<ReadableBlock>& rb,
                  const MessageInfo& msg_info);
   void ThreadFunc();
@@ -122,8 +123,8 @@ inline void ShmDispatcher::AddListener<PodMessage>(
                               const std::shared_ptr<ReadableBlock>& rb,
                               const MessageInfo& msg_info) {
     auto msg = std::make_shared<PodMessage>();
-    RETURN_IF(!msg->ParseFromArray(rb->buf,
-                                   static_cast<int>(rb->block->msg_size())));
+    RETURN_IF(!msg->BorrowFromArray(
+        rb->buf, static_cast<std::size_t>(rb->block->msg_size()), rb));
     if (!message_type.empty()) {
       msg->set_type_name(message_type);
     }
@@ -143,8 +144,8 @@ inline void ShmDispatcher::AddListener<PodMessage>(
                               const std::shared_ptr<ReadableBlock>& rb,
                               const MessageInfo& msg_info) {
     auto msg = std::make_shared<PodMessage>();
-    RETURN_IF(!msg->ParseFromArray(rb->buf,
-                                   static_cast<int>(rb->block->msg_size())));
+    RETURN_IF(!msg->BorrowFromArray(
+        rb->buf, static_cast<std::size_t>(rb->block->msg_size()), rb));
     if (!message_type.empty()) {
       msg->set_type_name(message_type);
     }
